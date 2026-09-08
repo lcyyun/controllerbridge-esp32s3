@@ -1,0 +1,59 @@
+name: Build ESP32-S3
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: Flash and PSRAM profile
+        type: choice
+        required: true
+        default: n16r8
+        options:
+          - n16r8
+          - n4
+          - n8
+          - n8r2
+          - n8r8
+          - esp32supermini
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: espressif/idf:v5.3.3@sha256:f467d0ff87ec6b3f80fef8fbebc360b66df96a444500d14da4783de486d139c8
+    defaults:
+      run:
+        shell: bash
+    env:
+      BOARD: ${{ inputs.board }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build with the committed dependency lock
+        run: |
+          . "$IDF_PATH/export.sh"
+          lock_before="$(sha256sum dependencies.lock)"
+          idf.py -B "build-$BOARD" -DNS2_ESP32S3_BOARD="$BOARD" build
+          printf '%s\n' "$lock_before" | sha256sum --check
+      - name: Upload build outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: esp32s3-${{ inputs.board }}-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            build-${{ inputs.board }}/*.bin
+            build-${{ inputs.board }}/*.elf
+            build-${{ inputs.board }}/*.map
+            build-${{ inputs.board }}/bootloader/bootloader.bin
+            build-${{ inputs.board }}/partition_table/partition-table.bin
+            build-${{ inputs.board }}/flasher_args.json
+            build-${{ inputs.board }}/flash_args
+            build-${{ inputs.board }}/sdkconfig
+            dependencies.lock

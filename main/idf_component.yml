@@ -1,0 +1,5 @@
+dependencies:
+  idf: "==5.3.3"
+  espressif/esp_tinyusb: "==2.2.0"
+  espressif/tinyusb: "==0.19.0~3"
+  espressif/led_strip: "==2.5.5"

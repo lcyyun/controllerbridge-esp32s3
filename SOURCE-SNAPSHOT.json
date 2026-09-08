@@ -1,0 +1,370 @@
+{
+  "schemaVersion": 1,
+  "repository": "controllerbridge-esp32s3",
+  "implementation": "source",
+  "preparationOnly": true,
+  "sourceUnchangedVerifiedAtUtc": "2026-09-08T14:55:06.0390779Z",
+  "provenance": "Working-file SHA256 snapshot; not a Git commit or build attestation.",
+  "files": [
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/esp32supermini/sdkconfig.defaults",
+      "destinationRelativePath": "boards/esp32supermini/sdkconfig.defaults",
+      "size": 572,
+      "sha256": "97c47de527c048cb9c0f9b6f68a217d4d7face1ffc3a4c97bc4fbb161f9415a5",
+      "lastWriteUtcTicks": 639192950229492754
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/n16r8/sdkconfig.defaults",
+      "destinationRelativePath": "boards/n16r8/sdkconfig.defaults",
+      "size": 544,
+      "sha256": "98afa23ebede674c1054b8843cdeb4b0108c13768d0888ceff0967484d37a4fb",
+      "lastWriteUtcTicks": 639192950229492754
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/n4/sdkconfig.defaults",
+      "destinationRelativePath": "boards/n4/sdkconfig.defaults",
+      "size": 612,
+      "sha256": "bfbbe7d1f045cec1c5b5f72c16e128f5d0954621faaaa1dfe959c6c83e331f82",
+      "lastWriteUtcTicks": 639192950229502791
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/n8/sdkconfig.defaults",
+      "destinationRelativePath": "boards/n8/sdkconfig.defaults",
+      "size": 362,
+      "sha256": "ebc7c5de690eedd2de3877c3f418186760b1d0aee012653684862749f07a7352",
+      "lastWriteUtcTicks": 639192950229512792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/n8r2/sdkconfig.defaults",
+      "destinationRelativePath": "boards/n8r2/sdkconfig.defaults",
+      "size": 480,
+      "sha256": "aadac517207e1b4555207ece2768eab7582c10535ae9add479aac4a88e2a16a3",
+      "lastWriteUtcTicks": 639192950229522793
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/n8r8/sdkconfig.defaults",
+      "destinationRelativePath": "boards/n8r8/sdkconfig.defaults",
+      "size": 480,
+      "sha256": "b624f707c9747e4d67639b6352899ac6a6eda63df95975ed5f99ffceae1232bf",
+      "lastWriteUtcTicks": 639192950229532795
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/boards/README.md",
+      "destinationRelativePath": "boards/README.md",
+      "size": 1307,
+      "sha256": "900fc6331268c7646d6832d681fd98f518c6e691823319718154d687098d73c9",
+      "lastWriteUtcTicks": 639192950229482753
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/CMakeLists.txt",
+      "destinationRelativePath": "CMakeLists.txt",
+      "size": 1127,
+      "sha256": "b35799fe191cee8f052f5e26d96971510fb8945fab3ec590a402d3da06cf0ca4",
+      "lastWriteUtcTicks": 639192950229462751
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/dependencies.lock",
+      "destinationRelativePath": "dependencies.lock",
+      "size": 1485,
+      "sha256": "f2ebee0a36c1d8862da29ae6ecb69ac027de40d5140ebf0997873aa61e7c9aa4",
+      "lastWriteUtcTicks": 639172162612026357
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "ns2pro-bridge/LICENSE",
+      "destinationRelativePath": "LICENSE",
+      "size": 1084,
+      "sha256": "18959cac90c14ea1fbaf61e5068f627eb61a01bb69c695620fd4d6105bdecc7a",
+      "lastWriteUtcTicks": 639163031266703675
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "ns2pro-bridge/LICENSES/DS5Dongle-MIT.txt",
+      "destinationRelativePath": "LICENSES/DS5Dongle-MIT.txt",
+      "size": 1084,
+      "sha256": "18959cac90c14ea1fbaf61e5068f627eb61a01bb69c695620fd4d6105bdecc7a",
+      "lastWriteUtcTicks": 639163031266748376
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "ns2pro-bridge/LICENSES/y700-switch2-pro-bridge-Apache-2.0.txt",
+      "destinationRelativePath": "LICENSES/y700-switch2-pro-bridge-Apache-2.0.txt",
+      "size": 11560,
+      "sha256": "de260a483f1c8a229d61d833aaabad9f9a7438f3384c59abefa50182cb798199",
+      "lastWriteUtcTicks": 639163031266773665
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/app_main.cpp",
+      "destinationRelativePath": "main/app_main.cpp",
+      "size": 1570,
+      "sha256": "64b20985fa51f003f27996a1b8bfc051bec2a04bffe9c59ac78db1b8977fa1c8",
+      "lastWriteUtcTicks": 639193920311665364
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/CMakeLists.txt",
+      "destinationRelativePath": "main/CMakeLists.txt",
+      "size": 685,
+      "sha256": "ecebf5bca2583fa883b346e9de28ee79654cf44bf369095ce83d27a001931be5",
+      "lastWriteUtcTicks": 639195136996857613
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/idf_component.yml",
+      "destinationRelativePath": "main/idf_component.yml",
+      "size": 78,
+      "sha256": "84e62e97bd3cd0e5f29477bbad09ea5378087079b23e811bc3c1421cf7db81d2",
+      "lastWriteUtcTicks": 639192950229552794
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/Kconfig.projbuild",
+      "destinationRelativePath": "main/Kconfig.projbuild",
+      "size": 553,
+      "sha256": "8e2c5c348ac135256145230ff902745e5a4e8dc2fe0140ba1994b9207ba8ff4f",
+      "lastWriteUtcTicks": 639192950229542793
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/manager_protocol.cpp",
+      "destinationRelativePath": "main/manager_protocol.cpp",
+      "size": 15303,
+      "sha256": "957e27af7b6b86efa2b9c71b5009c6975e652658c17236a303b421ae65643f29",
+      "lastWriteUtcTicks": 639193932262277462
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/manager_protocol.h",
+      "destinationRelativePath": "main/manager_protocol.h",
+      "size": 1628,
+      "sha256": "4533dbefcb104c7bb470dc08909a636bf357b23eb9b5dc137335886230279182",
+      "lastWriteUtcTicks": 639193932262252243
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_ble.cpp",
+      "destinationRelativePath": "main/ns2_ble.cpp",
+      "size": 44166,
+      "sha256": "3040c4e7d10aac6bc9f537ef9295e8bde5fa71a12fb5f8f116248188cc554a6f",
+      "lastWriteUtcTicks": 639192950229562792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_ble.h",
+      "destinationRelativePath": "main/ns2_ble.h",
+      "size": 2031,
+      "sha256": "3077ff2d7fb9635fd57b74ef9aac41926af6ad18d612466572a69092c9b8a21d",
+      "lastWriteUtcTicks": 639192950229562792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_board.cpp",
+      "destinationRelativePath": "main/ns2_board.cpp",
+      "size": 7248,
+      "sha256": "dcad9aa9437318d2339d510c7e1c322470f2644c259095a9235154c7c014fcd4",
+      "lastWriteUtcTicks": 639193915920763220
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_board.h",
+      "destinationRelativePath": "main/ns2_board.h",
+      "size": 144,
+      "sha256": "4617bb871c1b4da11a48666df840e86f7e4756af431214de04c41325759f7628",
+      "lastWriteUtcTicks": 639192950229572797
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_config.cpp",
+      "destinationRelativePath": "main/ns2_config.cpp",
+      "size": 7664,
+      "sha256": "5ccf5a4d03d2667fc00a1f89511376a8113e0306be837aeb9ce6c1bdff7f43be",
+      "lastWriteUtcTicks": 639192950229582792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_config.h",
+      "destinationRelativePath": "main/ns2_config.h",
+      "size": 1642,
+      "sha256": "b4c839814d15ca89ca09c73ec22228a26718af9efc7d90b9d219225686549d06",
+      "lastWriteUtcTicks": 639192950229582792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_gatt.cpp",
+      "destinationRelativePath": "main/ns2_gatt.cpp",
+      "size": 5884,
+      "sha256": "b036bc895220c9f941d63c3f8dcd28c478c163d57560ecbd12806e0ce99574d8",
+      "lastWriteUtcTicks": 639192950229592792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_gatt.h",
+      "destinationRelativePath": "main/ns2_gatt.h",
+      "size": 849,
+      "sha256": "c0a106a122e43ea94343cf2966f21209966b22eb013a4e32e678615f3f2dd7c0",
+      "lastWriteUtcTicks": 639192950229592792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_input.cpp",
+      "destinationRelativePath": "main/ns2_input.cpp",
+      "size": 14080,
+      "sha256": "a16a211c2c1899bfb9207fce6097a92b2b3dc36fe4fb1336128f9bed39f050b5",
+      "lastWriteUtcTicks": 639192950229602789
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_input.h",
+      "destinationRelativePath": "main/ns2_input.h",
+      "size": 1504,
+      "sha256": "1f4e3c159f44727326aefbaf08954776f158992bc2cc29e2cac8d42d2b237bf7",
+      "lastWriteUtcTicks": 639192950229612792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_protocol.cpp",
+      "destinationRelativePath": "main/ns2_protocol.cpp",
+      "size": 3374,
+      "sha256": "6a449f5a3833776abf365be4e0781282afd231c96e768633f741c3c04dd8d767",
+      "lastWriteUtcTicks": 639192950229612792
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_protocol.h",
+      "destinationRelativePath": "main/ns2_protocol.h",
+      "size": 872,
+      "sha256": "605ef9d7c0577f8df046c1fbf7e8accfc845d68e4206b3a8032bfe56fe00a0a8",
+      "lastWriteUtcTicks": 639192950229622791
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_usb_uac1.cpp",
+      "destinationRelativePath": "main/ns2_usb_uac1.cpp",
+      "size": 11898,
+      "sha256": "cebee577642d402328f84999262f4b1f155156bb5129160a841b3de894832079",
+      "lastWriteUtcTicks": 639194733628642916
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_usb_xinput_driver.cpp",
+      "destinationRelativePath": "main/ns2_usb_xinput_driver.cpp",
+      "size": 4761,
+      "sha256": "509df514889a9ff501a043ebbfeb19e7235f6cf678d89c99646125ee6c295bf7",
+      "lastWriteUtcTicks": 639194322015614317
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_usb_xinput_driver.h",
+      "destinationRelativePath": "main/ns2_usb_xinput_driver.h",
+      "size": 412,
+      "sha256": "7daed4ec77ceb2dd9b9aed17a06bcf6550972d88a8af363a4242dc0c2c44278a",
+      "lastWriteUtcTicks": 639194322015586200
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_usb.cpp",
+      "destinationRelativePath": "main/ns2_usb.cpp",
+      "size": 134660,
+      "sha256": "ea3f5804ecda0c93886184710cc4c2c77e81490d28dc282a7a232da97ece3f25",
+      "lastWriteUtcTicks": 639195138588074153
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/main/ns2_usb.h",
+      "destinationRelativePath": "main/ns2_usb.h",
+      "size": 329,
+      "sha256": "516442d29459fc6fb2d37f9a85037447890131b57af77edc3db753ef0c8ba318",
+      "lastWriteUtcTicks": 639192950229632781
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "ns2pro-bridge/NOTICE.md",
+      "destinationRelativePath": "NOTICE.md",
+      "size": 2671,
+      "sha256": "ec0d577965ab0aaa1d731007c54e5307ed873f2f1e046157727a9d7f48853453",
+      "lastWriteUtcTicks": 639163031266800873
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/ns2-s3-manager.py",
+      "destinationRelativePath": "ns2-s3-manager.py",
+      "size": 6112,
+      "sha256": "c2aa450ffe19022bbfc762ae1795e510655b1fc72d2ec21800b7194200183141",
+      "lastWriteUtcTicks": 639195350940425751
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/ns2-s3.ps1",
+      "destinationRelativePath": "ns2-s3.ps1",
+      "size": 3497,
+      "sha256": "460a3b5ebb27eba365459ea4ae7dd1264356199f4d40ca7aa18c39cdbfa3c75d",
+      "lastWriteUtcTicks": 639195350940415922
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/README.md",
+      "destinationRelativePath": "README.md",
+      "size": 6594,
+      "sha256": "9aeb2f15eb6d6a2c07b8fde7aff552ce4c0545839aec87f2d4440c7fb412d217",
+      "lastWriteUtcTicks": 639195445925489748
+    },
+    {
+      "repository": "controllerbridge-esp32s3",
+      "source": "esp32",
+      "sourceRelativePath": "firmware/esp32s3/sdkconfig.defaults",
+      "destinationRelativePath": "sdkconfig.defaults",
+      "size": 1012,
+      "sha256": "90c95535b0a6aae30eb33e580f814d3a9c4e818a9dd39e305b7583faa9cb8c14",
+      "lastWriteUtcTicks": 639194669100347165
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# ESP-IDF generated files. dependencies.lock is intentionally versioned.
+/build/
+/build-*/
+/dist/
+/.cache/
+/test-results/
+*.log
+*.cbmodule
+.env
+.env.*
+*.key
+*.pem
+/managed_components/
+/sdkconfig
+/sdkconfig.old
+
+# Local Python bytecode, not source or dependency manifests.
+__pycache__/
+*.py[cod]

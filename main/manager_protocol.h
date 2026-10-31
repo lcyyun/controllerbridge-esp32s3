@@ -6,14 +6,15 @@
 namespace ns2::manager {
 
 constexpr uint8_t kProtocolMajor = 1;
-constexpr uint8_t kProtocolMinor = 0;
-constexpr uint8_t kFeatureReportId = 0x01;
+constexpr uint8_t kProtocolMinor = 1;
+constexpr uint8_t kFeatureReportId = 0x7e;
 constexpr uint8_t kInterruptInReportId = 0x02;
 constexpr uint8_t kInterruptOutReportId = 0x03;
 constexpr size_t kFeaturePayloadLength = 63;
-constexpr size_t kInterruptPayloadLength = 7;
+constexpr size_t kInterruptPayloadLength = 0;
 constexpr size_t kHeaderLength = 22;
-constexpr uint16_t kMaxBodyLength = 512;
+constexpr uint16_t kMaxBodyLength = 4096;
+constexpr uint16_t kMaxRequestLength = 512;
 
 enum class Opcode : uint16_t {
     Hello = 0x0001,
@@ -21,6 +22,7 @@ enum class Opcode : uint16_t {
     Status = 0x0003,
     Echo = 0x0004,
     SetPersonality = 0x0005,
+    ExecuteCommand = 0x0010,
 };
 
 enum class StatusCode : uint16_t {
@@ -32,6 +34,7 @@ enum class StatusCode : uint16_t {
     PayloadTooLarge = 5,
     InternalError = 6,
     InvalidArgument = 7,
+    Busy = 8,
 };
 
 using PersonalityRequestHandler = StatusCode (*)(uint8_t personality);
@@ -45,6 +48,8 @@ struct RuntimeStatus {
 };
 
 void init();
+// Called from the application loop: never execute BLE/NVS work in a USB callback.
+void task();
 const uint8_t *device_id();
 size_t device_id_size();
 const char *device_id_hex();

@@ -8,22 +8,40 @@ Nintendo Switch 2 Pro Controller -> BLE -> ESP32-S3 -> native USB -> host
 
 ## Support
 
-- NS2Pro BLE discovery, connection, GATT initialization, input notifications,
-  reconnect handling, and NVS-backed settings.
-- Nintendo-style HID, compatible XInput, and DualSense-style USB output modes.
-  These are output identities, not support for receiving Xbox or DualSense
-  controllers over Bluetooth.
-- Input forwarding and rumble translation. The DualSense output path also has
-  experimental USB audio-OUT-to-haptics handling; microphone streaming is not
-  implemented.
-- Legacy HID feature commands in `main/ns2_usb.cpp`, used by
-  `ns2-s3-manager.py`. The separate `main/manager_protocol.*` source is retained
-  but is not compiled or integrated.
+Physical input and USB output are independent. The ESP32-S3 receives **NS2Pro
+via Bluetooth LE**; its radio cannot receive DualSense/Edge over Bluetooth
+Classic. It exposes four USB output identities: **DualSense, DualSense Edge,
+XInput and NS2Pro**. Selecting a saved mode detaches USB and restarts to apply
+new descriptors. The physical controller remains NS2Pro in all four modes.
 
-The imported README recorded tests with one controller setup. This split does
-not establish additional controller, console, host-driver, audio, or board
-compatibility. Security/bond recovery, rumble quality, and long-running
-reconnection still need hardware validation.
+- NS2Pro discovery, address/key/challenge pairing, persistent peer key, encrypted
+  reconnect, one saved active peer, explicit disconnect/forget, scan retry and
+  watchdog recovery. Any-button wake reconnect is implemented and awaits the
+  physical power-off/wake regression described in the validation document.
+- Buttons, sticks, digital NS2Pro triggers, FD2 motion, and 25 canonical mapping
+  dimensions (including C/GL/GR, paddle/function and touchpad destinations).
+  One NS2Pro source mapping applies to all output identities. Bindings persist
+  in NVS with schema/CRC validation; unavailable source buttons remain inactive.
+- Nintendo/XInput/Sony feedback translation and existing USB audio OUT to NS2Pro
+  haptics. Microphone capture and a Bluetooth headset audio stream are not
+  implemented. Sony console authentication is not claimed.
+- Physical report rate uses FD2's 32-bit or legacy's 8-bit source counter,
+  rejects duplicate/out-of-order frames, counts stationary fresh frames and
+  resets on reconnect/source changes. Input older than 250 ms is neutralized.
+  FD2 exposes measured battery millivolts; percentage comes only from a
+  successful legacy power-characteristic read and stays unknown on failure or
+  expiry. These battery reads never advance the input-frame counters.
+- ControllerBridge Manager connects directly through native USB vendor HID
+  feature report `0x7e` in every mode. `manager_protocol.cpp` is compiled and
+  carries bounded fragmented NSM1 commands. BLE/NVS work executes outside USB
+  callbacks. Existing Y7HID1/Y7HRS1 commands remain usable.
+- Status, input/motion diagnostics, mapping, settings save/reset, pairing,
+  rumble tests, and reboot are available in Manager. ROM recovery uses the
+  physical BOOT + RESET procedure and the board's flashing serial port.
+
+No hardware was flashed during this delivery. Host tests and ESP-IDF builds
+are distinct from controller, host-driver, audio and board validation. See
+`tools/tests/BLE-INPUT-VALIDATION.md` for the physical regression checklist.
 
 ## Boards
 
@@ -76,7 +94,8 @@ works when invoked from another current directory:
 .\ns2-s3.ps1 build -Board esp32supermini -BuildDir build-supermini
 ```
 
-It honors `IDF_PATH`, `IDF_TOOLS_PATH`, and `IDF_PYTHON_ENV_PATH`. Local fallback
+It honors `IDF_PATH`, `IDF_TOOLS_PATH`, and `IDF_PYTHON_ENV_PATH`. It next checks
+repository-local `.cache/esp-idf-v5.3.3` and `.cache/idf-tools`. Other fallback
 paths are `C:\Espressif\frameworks\esp-idf-v5.3.3`,
 `$env:USERPROFILE\.espressif`, and its `python_env\idf5.3_py3.12_env`.
 Tools are selected by that IDF installation's `idf_tools.py export`; the
@@ -87,26 +106,48 @@ It uses a pinned IDF 5.3.3 container, checks that the committed dependency lock
 does not change, and stores build artifacts for seven days. It does not flash,
 create releases, or publish firmware automatically.
 
-The standalone N16R8 build has passed locally with the pinned toolchain.
-Known non-fatal warnings include the imported, now-ignored
-`TINYUSB_TASK_STACK_SIZE` setting, an unused input helper, and Windows object
-path length warnings for long checkout paths. No runtime stack-size change was
-made during the split; validate hardware behavior separately.
+## Manager modules and firmware recovery
 
-## Optional Device Tools
-
-On Windows, `ns2-s3-manager.py` provides legacy HID status, mode, reboot, and
-raw-command operations, plus an XInput read check. It requires `pywinusb` in
-the Python environment used to run it. Do not assume a connected device
-supports the separate dormant manager protocol.
+Build the exact memory profile, then package its complete image set:
 
 ```powershell
-python .\ns2-s3-manager.py status
-python .\ns2-s3-manager.py xinput-test
+./module/package.ps1 -BuildDirectories ./build-n16r8
+# Multiple independently built profiles can share one module:
+./module/package.ps1 -BuildDirectories ./build-n4,./build-n16r8
+./tools/package-release.ps1 -BuildDirectory ./build-n16r8 -Board n16r8
 ```
 
-The PowerShell wrapper also retains explicit `flash`, `build-flash`, and
-`monitor` actions with `-Port`; these are not part of a build-only check.
+The `.cbmodule` includes bootloader at `0x0`, partition table at `0x8000`,
+application at `0x10000`, a board-specific flash manifest and payload hashes.
+Only explicitly supplied and validated board builds are advertised as
+installable. Manager's EspressifSerial backend uses its bundled esptool,
+probes ESP32-S3/flash capacity before writing and verifies the images after
+writing; no separate Python Manager process is needed. This requires the
+matching Manager integration patch delivered with this firmware preview.
+
+For native USB HID, connect the USB data connector wired to GPIO19/20.
+The USB-to-UART connector is a separate flashing/logging interface. Hold BOOT,
+press/release RESET, then release BOOT to enter ROM download mode if automatic
+serial reset is unavailable. Select the ESP32-S3 serial port, not an unrelated
+RP2350 serial bridge. The packaging/build/test commands never flash hardware.
+
+Legacy optional tools remain available (`ns2-s3-manager.py` with pywinusb).
+They are for diagnostics and are not required for Manager functionality.
+
+## Offline tests
+
+```powershell
+./tools/test-input.ps1
+./tools/test-mapping.ps1
+./tools/test-manager-protocol.ps1
+./tools/test-package-release.ps1
+./module/tests/package.Tests.ps1
+python ./tools/test_usb_contract.py --compiler g++
+```
+
+C++ host tests accept `-Compiler` for a C++17 compiler. They exercise the
+actual parser, mapping/codecs and Manager transport implementation. Packaging
+tests use synthetic fixtures and must not be mistaken for board tests.
 
 ## Provenance
 

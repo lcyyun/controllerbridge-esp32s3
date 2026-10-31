@@ -64,3 +64,21 @@ This project is not affiliated with, endorsed by, or sponsored by Nintendo,
 Sony, Valve, Raspberry Pi, or any other hardware/software vendor. Nintendo
 Switch, Switch Pro Controller, DualSense, Steam, Raspberry Pi, and related
 names are trademarks of their respective owners.
+
+## ESP32-S3 standalone implementation (0.2.0-preview.1)
+
+The historical attribution above is preserved from the imported firmware.
+This repository now builds an ESP-IDF implementation with NS2Pro BLE input,
+four USB output roles, persistent mapping, native management and complete
+board-specific image packaging. Changes to the imported files include the
+pairing/reconnect state machine, source-counter parsing, output descriptors,
+mapping/feature reports, callback scheduling, settings and packaging.
+
+The firmware links ESP-IDF 5.3.3 (Espressif Systems), its Apache Mynewt NimBLE
+port, Espressif Bluetooth libraries, Mbed TLS, FreeRTOS, esp_tinyusb 2.2.0,
+TinyUSB 0.19.0~3 (Ha Thach and contributors), and led_strip 2.5.5.
+License/notice copies are retained under LICENSES and shipped with image sets.
+The dependency revisions are pinned in dependencies.lock and ESP-IDF's
+v5.3.3 submodule manifest. Protocol layout verification also used the primary
+switch2_controller_research documentation by ndeadly; no hardware validation
+is inferred from a reference implementation's tests.

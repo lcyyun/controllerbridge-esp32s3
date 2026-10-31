@@ -10,6 +10,7 @@ enum class OutputMode : uint8_t {
     Nintendo = 0,
     XInput = 1,
     DualSense = 2,
+    DualSenseEdge = 3,
 };
 
 struct RuntimeConfig {
@@ -30,6 +31,7 @@ struct RuntimeConfig {
 
 esp_err_t config_init();
 esp_err_t config_save();
+esp_err_t config_reset();
 void config_get(RuntimeConfig *out);
 
 bool config_auto_connect();

@@ -5,6 +5,12 @@
 #include <cstring>
 
 #include "esp_timer.h"
+#ifndef NS2_HOST_TEST
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#else
+#include <mutex>
+#endif
 
 namespace ns2 {
 namespace {
@@ -20,7 +26,7 @@ constexpr uint32_t kFd2KnownButtonMask =
     0x00000100u | 0x00000200u | 0x00000400u | 0x00000800u |
     0x00001000u | 0x00002000u | 0x00004000u |
     0x00010000u | 0x00020000u | 0x00040000u | 0x00080000u |
-    0x00400000u | 0x00800000u | 0x01000000u | 0x02000000u;
+    0x00400000u | 0x00800000u | 0x01000000u | 0x02000000u | 0x10000000u;
 
 enum Button : uint8_t {
     ButtonB = 0,
@@ -64,6 +70,23 @@ InputSnapshot s_input;
 AxisCalibration s_fd2_axis;
 AxisCalibration s_legacy_axis;
 uint64_t s_last_input_us = 0;
+bool s_have_source_counter = false;
+bool s_legacy_power_valid = false;
+uint8_t s_legacy_power_raw = 0;
+uint64_t s_legacy_power_us = 0;
+constexpr uint64_t kBatteryStaleUs = 30000000ULL;
+#ifndef NS2_HOST_TEST
+portMUX_TYPE s_input_mux = portMUX_INITIALIZER_UNLOCKED;
+struct InputLock {
+    InputLock() { portENTER_CRITICAL(&s_input_mux); }
+    ~InputLock() { portEXIT_CRITICAL(&s_input_mux); }
+};
+#else
+std::mutex s_input_mux;
+struct InputLock {
+    std::lock_guard<std::mutex> lock{s_input_mux};
+};
+#endif
 
 void reset_axis(AxisCalibration *axis) {
     *axis = AxisCalibration{};
@@ -74,11 +97,6 @@ uint32_t read_le32(const uint8_t *p) {
            (static_cast<uint32_t>(p[1]) << 8) |
            (static_cast<uint32_t>(p[2]) << 16) |
            (static_cast<uint32_t>(p[3]) << 24);
-}
-
-int16_t read_le16s(const uint8_t *p) {
-    return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
-                                (static_cast<uint16_t>(p[1]) << 8));
 }
 
 uint16_t clamp12(int32_t value) {
@@ -130,25 +148,21 @@ void clear_battery(InputSnapshot *out) {
     out->battery_percent = 0;
     out->battery_charging = false;
     out->battery_offset = 0xff;
+    out->battery_voltage_mv = 0;
+    out->battery_from_legacy_read = false;
+    out->battery_age_ms = 0xffffffffu;
 }
 
-void apply_switch_battery_guess(InputSnapshot *out, const uint8_t *data, uint16_t len, uint8_t offset) {
-    if (offset >= len) {
-        return;
-    }
-
-    const uint8_t raw = data[offset];
-    const uint8_t level = (raw >> 4) & 0x0f;
+void apply_legacy_power(InputSnapshot *out, uint8_t raw) {
+    const uint8_t level = (raw >> 2) & 0x0f;
     out->battery_raw = raw;
-    out->battery_offset = offset;
-    out->battery_charging = (raw & 0x01) != 0;
-
-    // Switch-style reports usually carry battery as a high-nibble 0..8 or 0..10 level.
-    // Keep the raw byte visible even when the heuristic does not look plausible.
-    if (raw != 0x00 && raw != 0xff && level <= 10) {
-        const uint8_t percent = static_cast<uint8_t>(level * 10);
+    out->battery_offset = 1;
+    out->battery_charging = (raw & 0x02) != 0;
+    // Report 0x09 power info: bits 2..5 are a 0..9 level. Preserve
+    // an empty battery (level zero); reserved encodings remain unknown.
+    if ((raw & 0xc0) == 0 && level <= 9) {
         out->battery_valid = true;
-        out->battery_percent = percent > 100 ? 100 : percent;
+        out->battery_percent = static_cast<uint8_t>((level * 100u + 4u) / 9u);
     }
 }
 
@@ -205,7 +219,10 @@ uint32_t decode_fd2_buttons(uint32_t raw) {
 }
 
 void apply_axes(AxisCalibration *axis, InputSnapshot *state, uint16_t lx, uint16_t ly, uint16_t rx, uint16_t ry) {
-    if (!axis->calibrated && state->buttons == 0) {
+    // Do not learn a pushed stick as the center at connect time.
+    if (!axis->calibrated && state->buttons == 0 &&
+        lx >= 1536 && lx <= 2560 && ly >= 1536 && ly <= 2560 &&
+        rx >= 1536 && rx <= 2560 && ry >= 1536 && ry <= 2560) {
         axis->sum_lx += lx;
         axis->sum_ly += ly;
         axis->sum_rx += rx;
@@ -221,10 +238,10 @@ void apply_axes(AxisCalibration *axis, InputSnapshot *state, uint16_t lx, uint16
     }
 
     if (!axis->calibrated) {
-        state->lx = kCenter12;
-        state->ly = kCenter12;
-        state->rx = kCenter12;
-        state->ry = kCenter12;
+        state->lx = recenter_axis(lx, kCenter12);
+        state->ly = recenter_axis(ly, kCenter12);
+        state->rx = recenter_axis(rx, kCenter12);
+        state->ry = recenter_axis(ry, kCenter12);
         return;
     }
     state->lx = recenter_axis(lx, axis->center_lx);
@@ -242,9 +259,17 @@ bool parse_fd2(const uint8_t *data, uint16_t len, InputSnapshot *out) {
         return false;
     }
     out->buttons = decode_fd2_buttons(raw_buttons);
-    apply_switch_battery_guess(out, data, len, 3);
+    out->source_sequence = read_le32(data);
+    if (len >= 0x21) {
+        const uint16_t mv = static_cast<uint16_t>(data[0x1f]) |
+                            static_cast<uint16_t>(data[0x20]) << 8;
+        // Voltage is measured input. A percentage would require a validated
+        // battery discharge curve, so FD2 percentage remains explicitly unknown.
+        if (mv >= 2500 && mv <= 5000) out->battery_voltage_mv = mv;
+    }
     apply_axes(&s_fd2_axis, out, unpack12_x(data, 10), unpack12_y(data, 10), unpack12_x(data, 13), unpack12_y(data, 13));
     if (len >= kFd2FullReportMinLen) {
+        out->source_timestamp_us = read_le32(data + 0x2a);
         std::memcpy(out->motion, data + kFd2FullMotionOffset, kMotionSampleSize);
         out->motion_valid = true;
         out->motion_updates++;
@@ -263,6 +288,8 @@ bool parse_legacy(const uint8_t *data, uint16_t len, InputSnapshot *out) {
         return false;
     }
     clear_battery(out);
+    apply_legacy_power(out, data[1]);
+    out->source_sequence = data[0];
     out->buttons = decode_legacy_buttons(data[2], data[3], data[4]);
     apply_axes(&s_legacy_axis, out, unpack12_x(data, 5), unpack12_y(data, 5), unpack12_x(data, 8), unpack12_y(data, 8));
     return true;
@@ -271,16 +298,61 @@ bool parse_legacy(const uint8_t *data, uint16_t len, InputSnapshot *out) {
 } // namespace
 
 void input_reset() {
+    InputLock lock;
+    const uint32_t unique = s_input.unique_input_reports;
+    const uint32_t duplicates = s_input.duplicate_input_reports;
+    const uint32_t errors = s_input.parse_errors;
+    const uint32_t epoch = s_input.source_epoch + 1;
     s_input = InputSnapshot{};
+    s_input.unique_input_reports = unique;
+    s_input.duplicate_input_reports = duplicates;
+    s_input.parse_errors = errors;
+    s_input.source_epoch = epoch;
     reset_axis(&s_fd2_axis);
     reset_axis(&s_legacy_axis);
     s_last_input_us = 0;
+    s_have_source_counter = false;
+    s_legacy_power_valid = false;
+    s_legacy_power_us = 0;
 }
 
 bool input_parse_notify(InputReportKind kind, const uint8_t *data, uint16_t len) {
+    return input_parse_notify_at(kind, data, len, esp_timer_get_time());
+}
+
+bool input_parse_notify_at(InputReportKind kind, const uint8_t *data, uint16_t len, uint64_t received_us) {
+    InputLock lock;
     if (data == nullptr || len == 0) {
         s_input.parse_errors++;
         return false;
+    }
+
+    if (kind == InputReportKind::Unknown) {
+        // An unknown characteristic must never be inferred from length alone.
+        s_input.parse_errors++;
+        return false;
+    }
+    const uint16_t minimum = kind == InputReportKind::Fd2 ? 16 : 11;
+    if (len < minimum) {
+        s_input.parse_errors++;
+        return false;
+    }
+    if ((kind == InputReportKind::Fd2 && (read_le32(data + 4) & ~kFd2KnownButtonMask) != 0) ||
+        (kind == InputReportKind::Legacy && (data[4] & 0xe0) != 0)) {
+        s_input.parse_errors++;
+        return false;
+    }
+    const uint32_t sequence = kind == InputReportKind::Fd2 ? read_le32(data) : data[0];
+    if (s_have_source_counter && s_input.kind == kind) {
+        const uint32_t delta = kind == InputReportKind::Fd2
+            ? sequence - s_input.source_sequence
+            : static_cast<uint8_t>(sequence - s_input.source_sequence);
+        const uint32_t half_range = kind == InputReportKind::Fd2 ? 0x80000000u : 0x80u;
+        if (delta == 0 || delta >= half_range) {
+            s_input.duplicate_input_reports++;
+            // Repeated or older frames do not keep cached controls alive.
+            return true;
+        }
     }
 
     InputSnapshot next = s_input;
@@ -298,6 +370,7 @@ bool input_parse_notify(InputReportKind kind, const uint8_t *data, uint16_t len)
     next.motion_kind = InputReportKind::Unknown;
     next.motion_len = 0;
     next.motion_offset = 0;
+    next.source_timestamp_us = 0;
     std::memset(next.motion, 0, sizeof(next.motion));
     clear_battery(&next);
 
@@ -305,12 +378,6 @@ bool input_parse_notify(InputReportKind kind, const uint8_t *data, uint16_t len)
     if (kind == InputReportKind::Fd2) {
         ok = parse_fd2(data, len, &next);
     } else if (kind == InputReportKind::Legacy) {
-        ok = parse_legacy(data, len, &next);
-    } else if (len >= 16) {
-        next.kind = InputReportKind::Fd2;
-        ok = parse_fd2(data, len, &next);
-    } else {
-        next.kind = InputReportKind::Legacy;
         ok = parse_legacy(data, len, &next);
     }
 
@@ -321,29 +388,78 @@ bool input_parse_notify(InputReportKind kind, const uint8_t *data, uint16_t len)
 
     next.valid = true;
     next.updates = s_input.updates + 1;
+    next.unique_input_reports = s_input.unique_input_reports + 1;
+    next.input_rate_supported = true;
+    next.active_input = 1;
+    if (s_have_source_counter && s_input.kind != kind) next.source_epoch++;
     next.parse_errors = s_input.parse_errors;
     s_input = next;
-    s_last_input_us = esp_timer_get_time();
+    s_last_input_us = received_us;
+    s_have_source_counter = true;
     return true;
 }
 
 bool input_get_snapshot(InputSnapshot *out) {
-    if (out != nullptr) {
-        *out = s_input;
+    InputLock lock;
+    InputSnapshot snapshot = s_input;
+    const uint64_t now = esp_timer_get_time();
+    snapshot.input_rate_time_ms = static_cast<uint32_t>(now / 1000ULL);
+    snapshot.input_age_ms = s_have_source_counter
+        ? static_cast<uint32_t>((now - s_last_input_us) / 1000ULL) : 0xffffffffu;
+    if (snapshot.valid && snapshot.kind == InputReportKind::Fd2 && s_legacy_power_valid &&
+        now - s_legacy_power_us <= kBatteryStaleUs) {
+        apply_legacy_power(&snapshot, s_legacy_power_raw);
+        snapshot.battery_from_legacy_read = true;
+        snapshot.battery_age_ms = static_cast<uint32_t>((now - s_legacy_power_us) / 1000ULL);
+    } else if (snapshot.valid && snapshot.kind == InputReportKind::Legacy && snapshot.battery_valid) {
+        snapshot.battery_age_ms = snapshot.input_age_ms;
     }
-    return s_input.valid;
+    if (!snapshot.valid || snapshot.input_age_ms > kInputStaleMs) {
+        snapshot.valid = false;
+        snapshot.active_input = 0;
+        snapshot.buttons = 0;
+        snapshot.lx = snapshot.ly = snapshot.rx = snapshot.ry = kCenter12;
+        snapshot.raw_valid = false;
+        snapshot.raw_len = 0;
+        std::memset(snapshot.raw, 0, sizeof(snapshot.raw));
+        snapshot.motion_valid = false;
+        std::memset(snapshot.motion, 0, sizeof(snapshot.motion));
+        clear_battery(&snapshot);
+    }
+    if (out != nullptr) {
+        *out = snapshot;
+    }
+    return snapshot.valid;
+}
+
+void input_note_legacy_power(const uint8_t *data, uint16_t len) {
+    InputLock lock;
+    s_legacy_power_valid = false;
+    if (!data || len < 11 || (data[4] & 0xe0) != 0) return;
+    uint8_t report_bits = 0;
+    for (size_t i = 0; i < 11; ++i) report_bits |= data[i];
+    if (!report_bits) return; // an uninitialized readable attribute is not an empty battery
+    InputSnapshot power;
+    apply_legacy_power(&power, data[1]);
+    if (!power.battery_valid) return;
+    s_legacy_power_valid = true;
+    s_legacy_power_raw = data[1];
+    s_legacy_power_us = esp_timer_get_time();
 }
 
 uint32_t input_updates() {
+    InputLock lock;
     return s_input.updates;
 }
 
 uint32_t input_parse_errors() {
+    InputLock lock;
     return s_input.parse_errors;
 }
 
 uint32_t input_last_age_ms() {
-    if (s_last_input_us == 0) {
+    InputLock lock;
+    if (!s_have_source_counter) {
         return 0xffffffffu;
     }
     return static_cast<uint32_t>((esp_timer_get_time() - s_last_input_us) / 1000ULL);

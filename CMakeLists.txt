@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
+set(PROJECT_VER "0.2.0-preview.1")
+set(COMPONENTS main)
+
 set(IDF_TARGET "esp32s3" CACHE STRING "ESP-IDF target")
 set(NS2_ESP32S3_BOARD "n16r8" CACHE STRING "ESP32-S3 board profile")
 

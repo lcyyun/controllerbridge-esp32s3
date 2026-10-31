@@ -32,11 +32,11 @@ n4     4 MB flash, no required PSRAM; safest generic build.
 n8     8 MB flash, no required PSRAM.
 n8r2   8 MB flash, 2 MB Quad SPI PSRAM.
 n8r8   8 MB flash, 8 MB Octal SPI PSRAM.
-n16r8  16 MB flash, 8 MB Octal SPI PSRAM; current tested default.
+n16r8  16 MB flash, 8 MB Octal SPI PSRAM; default.
 esp32supermini  4 MB flash, 2 MB Quad SPI PSRAM.
 ```
 
 These are memory profiles, not a guarantee of board or host compatibility.
 Match the profile to the physical module and check native USB wiring. The
-import recorded N16R8 hardware testing; preparation of this standalone tree
-does not add hardware validation for the other profiles.
+import recorded N16R8 hardware testing; this preview has no new hardware
+validation for any profile. See docs/PARITY.md for current software evidence.

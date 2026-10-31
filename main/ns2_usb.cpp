@@ -3,8 +3,14 @@
 #include "ns2_ble.h"
 #include "ns2_config.h"
 #include "ns2_input.h"
+#include "ns2_mapping.h"
+#include "manager_protocol.h"
 #include "ns2_protocol.h"
 #include "ns2_usb_xinput_driver.h"
+#include "ns2_usb_reports.h"
+#include "ns2_json.h"
+#include "ns2_feedback.h"
+#include "ns2_usb_descriptor_checks.h"
 
 #include <algorithm>
 #include <cctype>
@@ -21,6 +27,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 #include "tusb.h"
@@ -32,7 +39,7 @@ const char *TAG = "ns2-usb";
 
 constexpr uint8_t kInputReportPayloadLen = 63;
 constexpr uint8_t kFeaturePayloadOffset = 11;
-constexpr uint16_t kFeatureReplyMax = 1024;
+constexpr uint16_t kFeatureReplyMax = 4096;
 constexpr uint16_t kDefaultReportRateHz = 250;
 constexpr uint16_t kMinReportRateHz = 1;
 constexpr uint16_t kMaxReportRateHz = 1000;
@@ -64,7 +71,6 @@ constexpr uint8_t kDs5OutputReportId = 0x02;
 constexpr uint8_t kDs5RumbleEnableMask = 0x03;
 constexpr uint16_t kDs5ImprovedRumbleOffset = 38;
 constexpr uint8_t kDs5ImprovedRumbleMask = 0x04;
-constexpr size_t kMotionReportOffset = 48;
 constexpr uint16_t kStickCenter12 = 2048;
 constexpr uint16_t kStickInputFullRange12 = 1200;
 constexpr uint32_t kUsbKeepaliveIntervalUs = 50000;
@@ -79,9 +85,9 @@ constexpr uint8_t kXInputEpIn = 0x81;
 constexpr uint8_t kXInputEpOut = 0x02;
 constexpr uint8_t kXInputManagerHidEpOut = 0x03;
 constexpr uint8_t kXInputManagerHidEpIn = 0x83;
-// Manager traffic uses HID feature reports on endpoint zero. Keep its
-// otherwise-unused interrupt endpoints small.
-constexpr uint8_t kManagerEndpointPacketSize = 8;
+// The existing XInput Manager endpoint uses a 64-byte packet/FIFO so it
+// also satisfies DWC2 implementations with a 16-word minimum TX FIFO.
+constexpr uint8_t kManagerEndpointPacketSize = 64;
 constexpr uint8_t kDualSenseAudioOutEp = 0x01;
 constexpr uint8_t kDualSenseAudioInEp = 0x82;
 constexpr uint8_t kDualSenseHidEpOut = 0x03;
@@ -93,7 +99,6 @@ constexpr uint8_t kDualSenseHidInterface = 3;
 constexpr uint8_t kDualSenseInterfaceCount = 4;
 constexpr uint8_t kVendorInstance = 0;
 constexpr uint8_t kGamepadHidInstance = 0;
-constexpr uint8_t kManagerHidInstance = 1;
 constexpr uint8_t kDualSenseInputReportId = 0x01;
 constexpr uint8_t kDualSenseInputPayloadLen = 63;
 constexpr uint8_t kUac1SpeakerFeatureUnit = 0x02;
@@ -126,7 +131,7 @@ constexpr uint32_t kModeComboMask = (1u << 6) | (1u << 16) | (1u << 17); // Plus
 constexpr char kFeatureSetMagic[] = "Y7HID1";
 constexpr char kFeatureReplyMagic[] = "Y7HRS1";
 
-const tusb_desc_device_t kDeviceDescriptor = {
+constexpr tusb_desc_device_t kDeviceDescriptor = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
@@ -143,7 +148,7 @@ const tusb_desc_device_t kDeviceDescriptor = {
     .bNumConfigurations = 0x01,
 };
 
-const tusb_desc_device_t kXInputDeviceDescriptor = {
+constexpr tusb_desc_device_t kXInputDeviceDescriptor = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
@@ -162,7 +167,7 @@ const tusb_desc_device_t kXInputDeviceDescriptor = {
     .bNumConfigurations = 0x01,
 };
 
-const tusb_desc_device_t kDualSenseDeviceDescriptor = {
+constexpr tusb_desc_device_t kDualSenseDeviceDescriptor = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
@@ -175,19 +180,30 @@ const tusb_desc_device_t kDualSenseDeviceDescriptor = {
     .bcdDevice = 0x0100,
     .iManufacturer = 0x01,
     .iProduct = 0x02,
-    .iSerialNumber = 0x00,
+    .iSerialNumber = 0x03,
     .bNumConfigurations = 0x01,
 };
 
-const uint8_t kHidReportDescriptor[] = {
+constexpr tusb_desc_device_t kDualSenseEdgeDeviceDescriptor = [] {
+    tusb_desc_device_t descriptor = kDualSenseDeviceDescriptor;
+    descriptor.idProduct = 0x0df2;
+    descriptor.bcdDevice = 0x0201;
+    descriptor.iSerialNumber = 3;
+    return descriptor;
+}();
+
+// NSM1 and legacy commands share the existing vendor collection and endpoint.
+constexpr uint8_t kHidReportDescriptor[] = {
     0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0x15, 0x00, 0x26, 0xff, 0x00,
     0x75, 0x08, 0x85, kUsbReportIdInput, 0x95, kInputReportPayloadLen, 0x09, 0x01,
     0x81, 0x02, 0x85, kUsbReportIdOutput, 0x95, kInputReportPayloadLen, 0x09, 0x01,
     0x91, 0x02, 0x85, kUsbReportIdFeature, 0x95, kInputReportPayloadLen, 0x09, 0x01,
+    0xb1, 0x02,
+    0x85, manager::kFeatureReportId, 0x95, manager::kFeaturePayloadLength, 0x09, 0x01,
     0xb1, 0x02, 0xc0,
 };
 
-const uint8_t kManagerReportDescriptor[] = {
+constexpr uint8_t kManagerReportDescriptor[] = {
     // Keep this interface compatible with the existing unified WebHID
     // manager: vendor page 0xff00, feature report 0x7f and Y7HID1/Y7HRS1.
     0x06, 0x00, 0xff,
@@ -195,10 +211,8 @@ const uint8_t kManagerReportDescriptor[] = {
     0xa1, 0x01,
     0x15, 0x00, 0x26, 0xff, 0x00,
     0x75, 0x08,
-    // A one-byte interrupt input/output pair makes this collection visible to
-    // HID clients that omit feature-only collections.  The manager itself
-    // continues to use only feature report 0x7f, so the 8-byte endpoint budget
-    // of the DualSense configuration is preserved.
+    // Existing interrupt input/output reports preserve the legacy HID contract.
+    // Both management protocols use feature reports on endpoint zero.
     0x85, kUsbReportIdInput,
     0x95, 0x01,
     0x09, 0x01,
@@ -211,10 +225,11 @@ const uint8_t kManagerReportDescriptor[] = {
     0x95, kInputReportPayloadLen,
     0x09, 0x01,
     0xb1, 0x02,
-    0xc0,
+    0x85, manager::kFeatureReportId, 0x95, manager::kFeaturePayloadLength, 0x09, 0x01,
+    0xb1, 0x02, 0xc0,
 };
 
-const uint8_t kDualSenseReportDescriptor[] = {
+constexpr uint8_t kDualSenseReportDescriptor[] = {
     0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31,
     0x09, 0x32, 0x09, 0x35, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x26, 0xff,
     0x00, 0x75, 0x08, 0x95, 0x06, 0x81, 0x02, 0x06, 0x00, 0xff, 0x09, 0x20,
@@ -241,23 +256,26 @@ const uint8_t kDualSenseReportDescriptor[] = {
     0x95, 0x3f, 0xb1, 0x02, 0x85, 0xf5, 0x09, 0x36, 0x95, 0x03, 0xb1, 0x02,
     0x85, 0xf6, 0x09, 0x37, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xf7, 0x09, 0x38,
     0x95, 0x3f, 0xb1, 0x02, 0x85, 0xf8, 0x09, 0x39, 0x95, 0x3f, 0xb1, 0x02,
-    0x85, 0xf9, 0x09, 0x3a, 0x95, 0x3f, 0xb1, 0x02, 0xc0,
+    0x85, 0xf9, 0x09, 0x3a, 0x95, 0x3f, 0xb1, 0x02,
+    0xc0,
     // A second top-level vendor collection lets WebHID discover the manager
     // on the existing DualSense HID interface, without consuming another pair
     // of USB endpoints (the DS audio FIFO leaves no room for them).
     0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01,
     0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08,
     0x85, kUsbReportIdFeature, 0x95, kInputReportPayloadLen, 0x09, 0x01,
+    0xb1, 0x02,
+    0x85, manager::kFeatureReportId, 0x95, manager::kFeaturePayloadLength, 0x09, 0x01,
     0xb1, 0x02, 0xc0,
 };
-static_assert(sizeof(kDualSenseReportDescriptor) == 0x0158);
+static_assert(sizeof(kDualSenseReportDescriptor) == 0x0160);
 
 const char kLangString[] = {0x09, 0x04};
 
 const char *kStringDescriptor[] = {
     kLangString,
     "Nintendo Co., Ltd.",
-    "Nintendo Switch Pro Controller",
+    "ControllerBridge ESP32-S3 NS2Pro",
     "NS2BRIDGE-S3-N-MGR2",
     "Nintendo Switch Pro Controller",
     "HID Interface",
@@ -268,7 +286,7 @@ const char *kStringDescriptor[] = {
 const char *kXInputStringDescriptor[] = {
     kLangString,
     "NS2Pro",
-    "NS2Pro XInput Controller",
+    "ControllerBridge ESP32-S3 XInput",
     "NS2BRIDGE-S3-X-MGR1",
     "ns2bridge Manager",
 };
@@ -276,10 +294,15 @@ const char *kXInputStringDescriptor[] = {
 const char *kDualSenseStringDescriptor[] = {
     kLangString,
     "Sony Interactive Entertainment",
-    "DualSense Wireless Controller",
+    "ControllerBridge ESP32-S3 DualSense",
     "ESP32S3DS5",
     "DualSense Wireless Controller",
     "HID Interface",
+};
+
+const char *kDualSenseEdgeStringDescriptor[] = {
+    kLangString, "Sony Interactive Entertainment", "ControllerBridge ESP32-S3 DualSense Edge",
+    "NS2BRIDGE-S3-E-MGR1", "DualSense Edge Wireless Controller", "HID Interface",
 };
 
 #define TUD_VENDOR_INOUT_DESCRIPTOR(_itfnum, _stridx, _epin, _epout, _epsize) \
@@ -296,7 +319,7 @@ const char *kDualSenseStringDescriptor[] = {
 constexpr uint16_t kConfigTotalLen = TUD_CONFIG_DESC_LEN +
                                      TUD_HID_INOUT_DESC_LEN +
                                      TUD_VENDOR_DESC_LEN;
-const uint8_t kConfigurationDescriptor[] = {
+constexpr uint8_t kConfigurationDescriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, kNintendoInterfaceCount, 4, kConfigTotalLen, 0, 500),
     TUD_HID_NS2_INOUT_DESCRIPTOR(kHidInterface, 5, HID_ITF_PROTOCOL_NONE, sizeof(kHidReportDescriptor), kHidEpIn, kHidEpOut, 64, 1),
     TUD_VENDOR_INOUT_DESCRIPTOR(kVendorInterface, 7, kVendorEpIn, kVendorEpOut, 64),
@@ -304,7 +327,7 @@ const uint8_t kConfigurationDescriptor[] = {
 static_assert(sizeof(kConfigurationDescriptor) == kConfigTotalLen);
 
 constexpr uint16_t kXInputConfigTotalLen = 0x30 + TUD_HID_INOUT_DESC_LEN;
-const uint8_t kXInputConfigurationDescriptor[] = {
+constexpr uint8_t kXInputConfigurationDescriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 2, 0, kXInputConfigTotalLen, 0, 500),
     9, TUSB_DESC_INTERFACE, 0, 0, 2, TUSB_CLASS_VENDOR_SPECIFIC, 0x5d, 0x01, 0,
     0x10, 0x21, 0x10, 0x01, 0x01, 0x24, 0x81, 0x14,
@@ -319,7 +342,7 @@ const uint8_t kXInputConfigurationDescriptor[] = {
 static_assert(sizeof(kXInputConfigurationDescriptor) == kXInputConfigTotalLen);
 
 constexpr uint16_t kDualSenseConfigTotalLen = 0x00e3;
-const uint8_t kDualSenseConfigurationDescriptor[] = {
+constexpr uint8_t kDualSenseConfigurationDescriptor[] = {
     0x09, TUSB_DESC_CONFIGURATION, U16_TO_U8S_LE(kDualSenseConfigTotalLen),
     kDualSenseInterfaceCount, 0x01, 0x00, 0xc0, 0xfa,
 
@@ -369,6 +392,30 @@ const uint8_t kDualSenseConfigurationDescriptor[] = {
     0x07, TUSB_DESC_ENDPOINT, kDualSenseHidEpOut, TUSB_XFER_INTERRUPT, 0x40, 0x00, 0x01,
 };
 static_assert(sizeof(kDualSenseConfigurationDescriptor) == kDualSenseConfigTotalLen);
+
+// Compile-time checks use the actual descriptors selected by every USB role.
+static_assert(usb_descriptor_checks::configuration(kConfigurationDescriptor,2,0,kHidEpIn,64,sizeof(kHidReportDescriptor)));
+static_assert(usb_descriptor_checks::configuration(kXInputConfigurationDescriptor,2,1,kXInputManagerHidEpIn,64,sizeof(kManagerReportDescriptor)));
+static_assert(usb_descriptor_checks::configuration(kDualSenseConfigurationDescriptor,4,3,kDualSenseHidEpIn,64,sizeof(kDualSenseReportDescriptor)));
+static_assert(usb_descriptor_checks::report_bits(kHidReportDescriptor,manager::kFeatureReportId,11)==504);
+static_assert(usb_descriptor_checks::report_bits(kManagerReportDescriptor,manager::kFeatureReportId,11)==504);
+static_assert(usb_descriptor_checks::report_bits(kDualSenseReportDescriptor,manager::kFeatureReportId,11)==504);
+static_assert(usb_descriptor_checks::report_bits(kHidReportDescriptor,kUsbReportIdFeature,11)==504);
+static_assert(usb_descriptor_checks::report_bits(kManagerReportDescriptor,kUsbReportIdFeature,11)==504);
+static_assert(usb_descriptor_checks::report_bits(kDualSenseReportDescriptor,kUsbReportIdFeature,11)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kHidReportDescriptor,manager::kFeatureReportId)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kManagerReportDescriptor,manager::kFeatureReportId)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kDualSenseReportDescriptor,manager::kFeatureReportId)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kHidReportDescriptor)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kManagerReportDescriptor)==504);
+static_assert(usb_descriptor_checks::vendor_feature_bits(kDualSenseReportDescriptor)==504);
+static_assert(kDualSenseDeviceDescriptor.idProduct!=kDualSenseEdgeDeviceDescriptor.idProduct);
+static_assert(usb_descriptor_checks::fifo(kConfigurationDescriptor,false).valid);
+static_assert(usb_descriptor_checks::fifo(kXInputConfigurationDescriptor,false).valid);
+static_assert(usb_descriptor_checks::fifo(kDualSenseConfigurationDescriptor,true).valid);
+static_assert(usb_descriptor_checks::fifo(kDualSenseConfigurationDescriptor,true).rx_words==222);
+static_assert(usb_descriptor_checks::fifo(kDualSenseConfigurationDescriptor,true).tx_words==32);
+static_assert(!usb_descriptor_checks::fifo(kDualSenseConfigurationDescriptor,false).valid);
 
 const uint8_t kMsOs10StringDescriptor[] = {
     0x12, TUSB_DESC_STRING,
@@ -529,6 +576,10 @@ struct UsbState {
     uint32_t audio_out_bytes = 0;
     uint16_t audio_last_read = 0;
     uint32_t audio_logged = 0;
+    uint32_t audio_haptic_blocks = 0;
+    uint32_t audio_ns2_updates = 0;
+    uint32_t audio_ns2_stops = 0;
+    uint32_t audio_ns2_mixed_ticks = 0;
     uint16_t report_rate_hz = kDefaultReportRateHz;
     uint32_t report_interval_us = 1000000u / kDefaultReportRateHz;
     uint64_t next_report_us = 0;
@@ -582,11 +633,41 @@ struct UsbState {
     char feature_last_command[64] = {};
     uint64_t mode_combo_started_us = 0;
     bool mode_combo_fired = false;
+    uint64_t restart_at_us = 0;
+    bool restart_detached = false;
+    bool legacy_command_pending = false;
+    uint32_t feedback_source_epoch = 0;
+    bool feedback_input_live = false;
+    bool input_transition_pending = false;
+    bool factory_reset_pending = false;
+    int factory_reset_error = 0;
+    uint64_t factory_reset_requested_us = 0;
 };
 
 UsbState s_usb;
+portMUX_TYPE s_feature_lock = portMUX_INITIALIZER_UNLOCKED;
+char *s_direct_reply = nullptr;
+size_t s_direct_reply_capacity = 0;
+TaskHandle_t s_direct_reply_task = nullptr;
+
+struct FeatureGuard {
+    FeatureGuard() { portENTER_CRITICAL(&s_feature_lock); }
+    ~FeatureGuard() { portEXIT_CRITICAL(&s_feature_lock); }
+};
+
+bool is_sony_mode(OutputMode mode) {
+    return mode == OutputMode::DualSense || mode == OutputMode::DualSenseEdge;
+}
+
+void schedule_restart() {
+    // Leave enough time for the complete fragmented feature response before
+    // detaching; never reset or block the USB callback.
+    s_usb.restart_at_us = esp_timer_get_time() + 1200000ULL;
+    s_usb.restart_detached = false;
+}
 
 struct Ds5AudioPacket {
+    FeedbackStamp stamp;
     uint16_t len = 0;
     uint8_t data[kDs5AudioPacketBytes] = {};
 };
@@ -594,6 +675,30 @@ struct Ds5AudioPacket {
 StaticQueue_t s_ds5_audio_queue_storage;
 uint8_t s_ds5_audio_queue_buffer[kDs5AudioQueueDepth * sizeof(Ds5AudioPacket)] = {};
 QueueHandle_t s_ds5_audio_queue = nullptr;
+
+enum class HostFeedbackKind : uint8_t { Nintendo, Sony, XInput };
+struct HostFeedbackPacket {
+    FeedbackStamp stamp;
+    HostFeedbackKind kind=HostFeedbackKind::Nintendo;
+    uint16_t len=0;
+    uint8_t data[kBulkReplyMax]={};
+};
+StaticQueue_t s_host_feedback_queue_storage;
+uint8_t s_host_feedback_queue_buffer[sizeof(HostFeedbackPacket)]={};
+QueueHandle_t s_host_feedback_queue=nullptr;
+
+bool queue_host_feedback(HostFeedbackKind kind,const uint8_t *data,uint16_t len) {
+    if(!s_host_feedback_queue || !data || len==0 || len>sizeof(HostFeedbackPacket::data))return false;
+    InputSnapshot input;
+    if(!input_get_snapshot(&input))return false;
+    HostFeedbackPacket packet{};
+    packet.stamp={input.source_epoch,static_cast<uint64_t>(esp_timer_get_time())};
+    packet.kind=kind;packet.len=len;
+    std::memcpy(packet.data,data,len);
+    // Effects are latest-state updates. Replacing an unread update also keeps
+    // a new stop packet from being dropped behind a full queue of old effects.
+    return xQueueOverwrite(s_host_feedback_queue,&packet)==pdTRUE;
+}
 
 void usb_event_cb(tinyusb_event_t *event, void *arg);
 
@@ -616,6 +721,8 @@ const tusb_desc_device_t *current_device_descriptor() {
         return &kXInputDeviceDescriptor;
     case OutputMode::DualSense:
         return &kDualSenseDeviceDescriptor;
+    case OutputMode::DualSenseEdge:
+        return &kDualSenseEdgeDeviceDescriptor;
     case OutputMode::Nintendo:
     default:
         return &kDeviceDescriptor;
@@ -628,6 +735,8 @@ const char **current_string_descriptor() {
         return kXInputStringDescriptor;
     case OutputMode::DualSense:
         return kDualSenseStringDescriptor;
+    case OutputMode::DualSenseEdge:
+        return kDualSenseEdgeStringDescriptor;
     case OutputMode::Nintendo:
     default:
         return kStringDescriptor;
@@ -640,6 +749,8 @@ size_t current_string_descriptor_count() {
         return sizeof(kXInputStringDescriptor) / sizeof(kXInputStringDescriptor[0]);
     case OutputMode::DualSense:
         return sizeof(kDualSenseStringDescriptor) / sizeof(kDualSenseStringDescriptor[0]);
+    case OutputMode::DualSenseEdge:
+        return sizeof(kDualSenseEdgeStringDescriptor) / sizeof(kDualSenseEdgeStringDescriptor[0]);
     case OutputMode::Nintendo:
     default:
         return sizeof(kStringDescriptor) / sizeof(kStringDescriptor[0]);
@@ -651,6 +762,7 @@ const uint8_t *current_configuration_descriptor() {
     case OutputMode::XInput:
         return kXInputConfigurationDescriptor;
     case OutputMode::DualSense:
+    case OutputMode::DualSenseEdge:
         return kDualSenseConfigurationDescriptor;
     case OutputMode::Nintendo:
     default:
@@ -660,6 +772,10 @@ const uint8_t *current_configuration_descriptor() {
 
 bool is_manager_hid_instance(uint8_t instance) {
     return s_usb.output_mode == OutputMode::XInput && instance == kGamepadHidInstance;
+}
+
+bool is_nsm_manager_hid_instance(uint8_t instance) {
+    return instance == kGamepadHidInstance;
 }
 
 bool is_gamepad_hid_instance(uint8_t instance) {
@@ -705,12 +821,14 @@ bool parse_output_mode(const char *text, OutputMode *out) {
         return false;
     }
     if (std::strcmp(text, "nintendo") == 0 ||
+        std::strcmp(text, "ns2pro") == 0 ||
         std::strcmp(text, "switch") == 0 ||
         std::strcmp(text, "pro2") == 0) {
         *out = OutputMode::Nintendo;
         return true;
     }
     if (std::strcmp(text, "xinput") == 0 ||
+        std::strcmp(text, "xbox360") == 0 ||
         std::strcmp(text, "xbox") == 0) {
         *out = OutputMode::XInput;
         return true;
@@ -718,6 +836,13 @@ bool parse_output_mode(const char *text, OutputMode *out) {
     if (std::strcmp(text, "dualsense") == 0 ||
         std::strcmp(text, "ds5") == 0) {
         *out = OutputMode::DualSense;
+        return true;
+    }
+    if (std::strcmp(text, "dualsense_edge") == 0 || std::strcmp(text, "dualsense-edge") == 0 ||
+        std::strcmp(text, "dse") == 0 ||
+        std::strcmp(text, "ds5edge") == 0 ||
+        std::strcmp(text, "edge") == 0) {
+        *out = OutputMode::DualSenseEdge;
         return true;
     }
     return false;
@@ -804,6 +929,8 @@ OutputMode next_output_mode(OutputMode mode) {
     case OutputMode::XInput:
         return OutputMode::DualSense;
     case OutputMode::DualSense:
+        return OutputMode::DualSenseEdge;
+    case OutputMode::DualSenseEdge:
     default:
         return OutputMode::Nintendo;
     }
@@ -826,12 +953,15 @@ void check_mode_combo(const InputSnapshot *input, bool live, uint64_t now) {
 
     const OutputMode next = next_output_mode(s_usb.output_mode);
     config_set_output_mode(next);
-    config_save();
+    if (config_save() != ESP_OK) {
+        config_set_output_mode(s_usb.output_mode);
+        return;
+    }
     s_usb.mode_combo_fired = true;
     ESP_LOGW(TAG, "mode combo held; switching USB mode %s -> %s",
              config_output_mode_name(s_usb.output_mode),
              config_output_mode_name(next));
-    esp_restart();
+    schedule_restart();
 }
 
 void fill_neutral_input(uint8_t report[kInputReportPayloadLen]) {
@@ -871,7 +1001,7 @@ void fill_input_report(const InputSnapshot *input, uint8_t report[kInputReportPa
     if (button_pressed(*input, 7)) report[5] |= 0x04;  // RStick
     if (button_pressed(*input, 15)) report[5] |= 0x08; // LStick
     if (button_pressed(*input, 16)) report[5] |= 0x10; // Home
-    if (button_pressed(*input, 17)) report[5] |= 0x20; // Capture
+    if (button_pressed(*input, 17) || button_pressed(*input, 21)) report[5] |= 0x20; // Capture
     if (button_pressed(*input, 20)) report[5] |= 0x40; // C
 
     if (button_pressed(*input, 8)) report[6] |= 0x01;  // DDown
@@ -887,9 +1017,7 @@ void fill_input_report(const InputSnapshot *input, uint8_t report[kInputReportPa
     const StickAxes12 right_stick = normalize_stick_pair(input->rx, input->ry);
     pack_stick(report, 10, left_stick.x, left_stick.y);
     pack_stick(report, 13, right_stick.x, right_stick.y);
-    if (input->motion_valid && kMotionReportOffset + kMotionSampleSize <= kInputReportPayloadLen) {
-        std::memcpy(report + kMotionReportOffset, input->motion, kMotionSampleSize);
-    }
+    usb_ns2_motion(*input, report);
     s_usb.parsed_reports++;
     if (s_usb.debug_live_log && s_usb.debug_live_logged < 200) {
         ESP_LOGW(TAG,
@@ -944,7 +1072,7 @@ void fill_xinput_report(const InputSnapshot *input, uint8_t report[kXInputReport
     if (button_pressed(*input, 10)) report[2] |= 0x04; // Left
     if (button_pressed(*input, 9)) report[2] |= 0x08;  // Right
     if (button_pressed(*input, 6)) report[2] |= 0x10;  // Start
-    if (button_pressed(*input, 14)) report[2] |= 0x20; // Back
+    if (button_pressed(*input, 14) || button_pressed(*input, 17)) report[2] |= 0x20; // Back/Capture
     if (button_pressed(*input, 15)) report[2] |= 0x40; // LS
     if (button_pressed(*input, 7)) report[2] |= 0x80;  // RS
 
@@ -975,6 +1103,8 @@ void fill_dualsense_report(const InputSnapshot *input, uint8_t report[kDualSense
     report[4] = 0;
     report[5] = 0;
     report[7] = 0x08;
+    report[6] = s_usb.counter++;
+    usb_sony_report_extras(input, report, s_usb.output_mode == OutputMode::DualSenseEdge);
     if (input == nullptr || !input->valid) {
         return;
     }
@@ -1010,7 +1140,7 @@ void fill_dualsense_report(const InputSnapshot *input, uint8_t report[kDualSense
     if (button_pressed(*input, 4)) report[8] |= 0x02;  // R1
     if (button_pressed(*input, 13)) report[8] |= 0x04; // L2
     if (button_pressed(*input, 5)) report[8] |= 0x08;  // R2
-    if (button_pressed(*input, 14)) report[8] |= 0x10; // Create
+    if (button_pressed(*input, 14) || button_pressed(*input, 17)) report[8] |= 0x10; // Create
     if (button_pressed(*input, 6)) report[8] |= 0x20;  // Options
     if (button_pressed(*input, 15)) report[8] |= 0x40; // L3
     if (button_pressed(*input, 7)) report[8] |= 0x80;  // R3
@@ -1416,7 +1546,7 @@ void bridge_dual_motor_output_to_ble(const char *source,
 }
 
 bool bridge_ds5_output_to_ble(uint8_t report_id, const uint8_t *buffer, uint16_t len) {
-    if (s_usb.output_mode != OutputMode::DualSense) {
+    if (!is_sony_mode(s_usb.output_mode)) {
         return false;
     }
     if (buffer == nullptr || len == 0 || (report_id != 0 && report_id != kDs5OutputReportId)) {
@@ -1530,6 +1660,19 @@ bool bridge_hid_output_to_ble(const uint8_t *data, uint16_t len) {
     encode_ble_vibration_from_switch_frame(data, len, 0x12, right);
     update_rumble_stream(left, right);
     return true;
+}
+
+void process_host_feedback() {
+    HostFeedbackPacket packet{};
+    if(!s_host_feedback_queue || xQueueReceive(s_host_feedback_queue,&packet,0)!=pdTRUE)return;
+    InputSnapshot input;
+    input_get_snapshot(&input);
+    if(!feedback_matches_source(packet.stamp,input,esp_timer_get_time()))return;
+    switch(packet.kind) {
+    case HostFeedbackKind::Nintendo: bridge_hid_output_to_ble(packet.data,packet.len);break;
+    case HostFeedbackKind::Sony: bridge_ds5_output_to_ble(kDs5OutputReportId,packet.data,packet.len);break;
+    case HostFeedbackKind::XInput: bridge_xinput_output_to_ble(packet.data,packet.len);break;
+    }
 }
 
 bool hid_guard_timed_out() {
@@ -1789,7 +1932,8 @@ void start_test_rumble(bool left_on, bool right_on, uint16_t hold_ms, uint16_t a
 void inject_mode_rumble(uint8_t left_heavy, uint8_t right_light, uint16_t hold_ms) {
     s_usb.rumble_enabled = true;
     switch (s_usb.output_mode) {
-    case OutputMode::DualSense: {
+    case OutputMode::DualSense:
+    case OutputMode::DualSenseEdge: {
         uint8_t payload[64] = {};
         payload[0] = kDs5RumbleEnableMask;
         payload[2] = right_light;
@@ -1865,9 +2009,11 @@ void rumble_task() {
 
     uint8_t packet[33];
     build_pro2_hd_packet(s_usb.rumble_packet_id++ & 0x0f, left, right, packet);
-    const bool sent = ble_send_rumble(packet, sizeof(packet));
+    const bool sent = ble_send_rumble(packet, sizeof(packet),s_usb.feedback_source_epoch);
     if (sent) {
         s_usb.rumble_writes++;
+        if (std::strcmp(s_usb.rumble_last_source, "ds5_audio") == 0)
+            s_usb.audio_ns2_mixed_ticks++;
     } else {
         s_usb.rumble_errors++;
     }
@@ -1933,6 +2079,11 @@ void queue_feature_json(const char *json) {
         len = std::strlen(json);
     }
 
+    FeatureGuard lock;
+    if (s_direct_reply != nullptr && xTaskGetCurrentTaskHandle() == s_direct_reply_task) {
+        std::snprintf(s_direct_reply, s_direct_reply_capacity, "%s", json);
+        return;
+    }
     std::memcpy(s_usb.feature_reply, json, len);
     s_usb.feature_reply_len = static_cast<uint16_t>(len);
     s_usb.feature_reply_offset = 0;
@@ -1965,7 +2116,7 @@ void format_settings_json(char *out, size_t out_len, bool saved = false) {
                   "\"rumble_enabled\":%s,"
                   "\"report_rate_hz\":%u,\"rumble_scale_percent\":%u,"
                   "\"rumble_hold_ms\":%u,\"rumble_tick_ms\":%u,"
-                  "\"rumble_stop_packets\":%u}",
+                  "\"rumble_stop_packets\":%u,\"reset_pending\":%s,\"reset_error\":%d}",
                   saved ? "true" : "false",
                   config_output_mode_name(s_usb.output_mode),
                   config_output_mode_name(saved_output_mode()),
@@ -1977,7 +2128,8 @@ void format_settings_json(char *out, size_t out_len, bool saved = false) {
                   static_cast<unsigned>(s_usb.rumble_scale_percent),
                   static_cast<unsigned>(s_usb.rumble_hold_ms),
                   static_cast<unsigned>(s_usb.rumble_tick_ms),
-                  static_cast<unsigned>(s_usb.rumble_stop_packets));
+                  static_cast<unsigned>(s_usb.rumble_stop_packets),
+                  s_usb.factory_reset_pending ? "true" : "false", s_usb.factory_reset_error);
 }
 
 void format_usb_status_json(char *out, size_t out_len) {
@@ -2001,7 +2153,10 @@ void format_usb_status_json(char *out, size_t out_len) {
                   "\"audio_last_interface\":%u,\"audio_last_alt\":%u,"
                   "\"audio_out_packets\":%lu,\"audio_out_bytes\":%lu,"
                   "\"usb_raw_passthrough\":%s,"
-                  "\"web_parse_reports\":%s,\"feature_set\":%lu,\"feature_get\":%lu}",
+                  "\"web_parse_reports\":%s,\"feature_set\":%lu,\"feature_get\":%lu,"
+                  "\"role\":\"%s\",\"audio_in_packets\":0,\"audio_mic_open\":false,"
+                  "\"audio_haptic_blocks\":%lu,\"audio_ns2_updates\":%lu,"
+                  "\"audio_ns2_stops\":%lu,\"audio_ns2_mixed_ticks\":%lu}",
                   config_output_mode_name(s_usb.output_mode),
                   config_output_mode_name(saved_output_mode()),
                   output_mode_restart_required() ? "true" : "false",
@@ -2033,7 +2188,12 @@ void format_usb_status_json(char *out, size_t out_len) {
                   s_usb.raw_passthrough ? "true" : "false",
                   s_usb.web_parse_reports ? "true" : "false",
                   static_cast<unsigned long>(s_usb.feature_set_count),
-                  static_cast<unsigned long>(s_usb.feature_get_count));
+                  static_cast<unsigned long>(s_usb.feature_get_count),
+                  config_output_mode_name(s_usb.output_mode),
+                  static_cast<unsigned long>(s_usb.audio_haptic_blocks),
+                  static_cast<unsigned long>(s_usb.audio_ns2_updates),
+                  static_cast<unsigned long>(s_usb.audio_ns2_stops),
+                  static_cast<unsigned long>(s_usb.audio_ns2_mixed_ticks));
 }
 
 void format_ble_status_json(char *out, size_t out_len) {
@@ -2048,8 +2208,12 @@ void format_ble_status_json(char *out, size_t out_len) {
     if (stats.saved_target_valid) {
         format_ble_addr(stats.saved_addr, saved, sizeof(saved));
     }
+    char last_name[sizeof(stats.last_name)*6+1];
+    char last_addr[sizeof(stats.last_addr)*6+1];
+    json_escape_bytes(stats.last_name,sizeof(stats.last_name),last_name,sizeof(last_name));
+    json_escape_bytes(stats.last_addr,sizeof(stats.last_addr),last_addr,sizeof(last_addr));
 
-    std::snprintf(out,
+    const int base_length=std::snprintf(out,
                   out_len,
                   "{\"ok\":true,\"profile\":\"ns2pro\",\"platform\":\"esp32s3\","
                   "\"state\":\"%s\",\"ready\":%s,\"connected\":%s,"
@@ -2070,7 +2234,8 @@ void format_ble_status_json(char *out, size_t out_len) {
                   "\"data_len_tx_time\":%u,\"data_len_rx_time\":%u,"
                   "\"connect_attempts\":%lu,\"disconnect_count\":%lu,"
                   "\"scan_starts\":%lu,\"scan_errors\":%lu,"
-                  "\"adv_seen\":%lu,\"adv_logged\":%lu,\"last_error\":%d}",
+                  "\"adv_seen\":%lu,\"adv_logged\":%lu,\"last_error\":%d,"
+                  "\"encrypted\":%s,\"pairing_key_saved\":%s,\"persist_pending\":%s,\"persist_error\":%d}",
                   stats.gatt_ready ? (input_last_age_ms() < 500 ? "connected_live" : "connected_no_notify") :
                       (stats.connected ? "connecting" : (stats.scanning ? "scanning" : (stats.started ? "idle" : "booting"))),
                   stats.gatt_ready ? "true" : "false",
@@ -2085,8 +2250,8 @@ void format_ble_status_json(char *out, size_t out_len) {
                   static_cast<unsigned>(stats.saved_addr_type),
                   local,
                   static_cast<unsigned>(stats.own_addr_type),
-                  stats.last_addr,
-                  stats.last_name,
+                  last_addr,
+                  last_name,
                   static_cast<int>(stats.last_rssi),
                   static_cast<unsigned long>(stats.notify_count),
                   static_cast<unsigned long>(stats.notify_hz),
@@ -2115,7 +2280,79 @@ void format_ble_status_json(char *out, size_t out_len) {
                   static_cast<unsigned long>(stats.scan_errors),
                   static_cast<unsigned long>(stats.adv_seen),
                   static_cast<unsigned long>(stats.adv_logged),
-                  stats.last_error);
+                  stats.last_error,stats.encrypted ? "true" : "false",
+                  stats.pairing_key_saved ? "true" : "false",stats.persist_pending ? "true" : "false",
+                  stats.persist_error);
+    if (base_length<0 || static_cast<size_t>(base_length)>=out_len) {
+        std::snprintf(out,out_len,"{\"ok\":false,\"error\":\"reply_too_large\"}");
+        return;
+    }
+    InputSnapshot input;
+    input_get_snapshot(&input);
+    const size_t used = std::strlen(out);
+    if (used != 0 && used < out_len && out[used - 1] == '}') {
+        char battery[8] = "null";
+        if (input.valid && input.battery_valid)
+            std::snprintf(battery, sizeof(battery), "%u", input.battery_percent);
+        const int appended=std::snprintf(out + used - 1, out_len - used + 1,
+            ",\"unique_input_reports\":%lu,\"input_rate_time_ms\":%lu,"
+            "\"input_rate_supported\":%s,\"input_age_ms\":%lu,\"source_epoch\":%lu,"
+            "\"active_input\":\"%s\",\"battery_valid\":%s,\"battery_percent\":%s,"
+            "\"input_source\":\"ns2pro_ble\",\"output_mode\":\"%s\",\"role\":\"%s\","
+            "\"input_battery_percent\":%s,\"input_valid\":%s,\"input_stale\":%s,"
+            "\"ns2_saved\":%s,\"ns2_connected\":%s,\"ns2_scanning\":%s}",
+            static_cast<unsigned long>(input.unique_input_reports),
+            static_cast<unsigned long>(input.input_rate_time_ms),
+            input.input_rate_supported ? "true" : "false",
+            static_cast<unsigned long>(input.input_age_ms),
+            static_cast<unsigned long>(input.source_epoch), input.valid ? "ns2pro" : "none",
+            input.valid && input.battery_valid ? "true" : "false", battery,
+            config_output_mode_name(s_usb.output_mode),config_output_mode_name(s_usb.output_mode),
+            battery,input.valid ? "true" : "false", input.valid ? "false" : "true",
+            stats.saved_target_valid ? "true" : "false",stats.connected ? "true" : "false",
+            stats.scanning ? "true" : "false");
+        if (appended<0 || static_cast<size_t>(appended)>=out_len-used+1)
+            std::snprintf(out,out_len,"{\"ok\":false,\"error\":\"reply_too_large\"}");
+    }
+}
+
+void format_input_status_json(char *out, size_t capacity) {
+    InputSnapshot input;
+    input_get_snapshot(&input);
+    const StickAxes12 left = normalize_stick_pair(input.lx, input.ly);
+    const StickAxes12 right = normalize_stick_pair(input.rx, input.ry);
+    char battery[8] = "null";
+    if (input.valid && input.battery_valid)
+        std::snprintf(battery, sizeof(battery), "%u", input.battery_percent);
+    int16_t motion[6] = {};
+    if (input.valid && input.motion_valid) {
+        for (unsigned i=0; i<6; ++i)
+            motion[i] = static_cast<int16_t>(static_cast<uint16_t>(input.motion[2*i]) |
+                                            (static_cast<uint16_t>(input.motion[2*i+1]) << 8));
+    }
+    std::snprintf(out, capacity,
+        "{\"ok\":true,\"profile\":\"ns2pro\",\"platform\":\"esp32s3\","
+        "\"valid\":%s,\"input_valid\":%s,\"active_input\":\"%s\",\"input_source\":\"ns2pro_ble\","
+        "\"buttons\":%lu,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d,\"lt\":%u,\"rt\":%u,"
+        "\"unique_input_reports\":%lu,\"duplicate_input_reports\":%lu,\"input_rate_time_ms\":%lu,"
+        "\"input_rate_supported\":%s,\"input_age_ms\":%lu,\"source_epoch\":%lu,\"source_sequence\":%lu,"
+        "\"battery_valid\":%s,\"battery_percent\":%s,\"battery_charging\":%s,\"battery_voltage_mv\":%u,"
+        "\"motion_valid\":%s,\"source_timestamp_us\":%lu,\"input_stale\":%s,\"input_battery_percent\":%s,"
+        "\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d}",
+        input.valid ? "true" : "false", input.valid ? "true" : "false", input.valid ? "ns2pro" : "none",
+        static_cast<unsigned long>(mapping_canonical_buttons(input.buttons)),
+        static_cast<int>(axis_to_xinput_normalized(left.x,false)),
+        static_cast<int>(axis_to_xinput_normalized(left.y,false)),
+        static_cast<int>(axis_to_xinput_normalized(right.x,false)),
+        static_cast<int>(axis_to_xinput_normalized(right.y,false)),
+        button_pressed(input,13) ? 65535u : 0u, button_pressed(input,5) ? 65535u : 0u,
+        static_cast<unsigned long>(input.unique_input_reports),static_cast<unsigned long>(input.duplicate_input_reports),
+        static_cast<unsigned long>(input.input_rate_time_ms),input.input_rate_supported ? "true" : "false",
+        static_cast<unsigned long>(input.input_age_ms),static_cast<unsigned long>(input.source_epoch),
+        static_cast<unsigned long>(input.source_sequence),input.valid && input.battery_valid ? "true" : "false",
+        battery,input.valid && input.battery_charging ? "true" : "false",input.battery_voltage_mv,
+        input.motion_valid ? "true" : "false",static_cast<unsigned long>(input.source_timestamp_us),
+        input.valid ? "false" : "true", battery, motion[0],motion[1],motion[2],motion[3],motion[4],motion[5]);
 }
 
 void format_motion_status_json(char *out, size_t out_len) {
@@ -2142,7 +2379,7 @@ void format_motion_status_json(char *out, size_t out_len) {
                   valid ? "true" : "false",
                   valid ? input_kind_name(input.kind) : "NEUTRAL",
                   valid ? static_cast<unsigned>(input.len) : 0u,
-                  valid ? static_cast<unsigned long>(input.updates) : static_cast<unsigned long>(s_usb.reports_sent),
+                  static_cast<unsigned long>(input.updates),
                   valid ? static_cast<unsigned long>(input.buttons) : 0ul,
                   valid ? static_cast<unsigned>(input.lx) : 2048u,
                   valid ? static_cast<unsigned>(input.ly) : 2048u,
@@ -2191,8 +2428,8 @@ void format_rumble_config_json(char *out, size_t out_len) {
 }
 
 void handle_usb_command(const char *command) {
-    static char json[1280];
-    if (command_is(command, "usb status")) {
+    static char json[2048];
+    if (command_is(command, "usb status") || command_is(command, "audio status")) {
         format_usb_status_json(json, sizeof(json));
         queue_feature_json(json);
         return;
@@ -2248,7 +2485,8 @@ void handle_usb_command(const char *command) {
             command + std::strlen("usb rate") :
             command + std::strlen("report rate");
         uint32_t rate = 0;
-        if (!parse_next_uint(&cursor, &rate)) {
+        if (!parse_next_uint(&cursor, &rate) || *skip_spaces(cursor) != 0 ||
+            rate < kMinReportRateHz || rate > kMaxReportRateHz) {
             queue_feature_error("usage_usb_rate_hz");
             return;
         }
@@ -2256,13 +2494,14 @@ void handle_usb_command(const char *command) {
         handle_usb_command("usb config");
         return;
     }
-    if (command_has_prefix(command, "usb mode") || command_has_prefix(command, "output mode")) {
+    if (command_has_prefix(command, "usb mode") || command_has_prefix(command, "output mode") ||
+        command_has_prefix(command, "role set")) {
         const char *cursor = command_has_prefix(command, "usb mode") ?
             command + std::strlen("usb mode") :
-            command + std::strlen("output mode");
+            command + (command_has_prefix(command, "role set") ? std::strlen("role set") : std::strlen("output mode"));
         OutputMode mode = OutputMode::Nintendo;
         if (!parse_output_mode(cursor, &mode)) {
-            queue_feature_error("usage_usb_mode_nintendo_xinput_dualsense");
+            queue_feature_error("usage_usb_mode_nintendo_xinput_dualsense_dualsense_edge");
             return;
         }
         s_usb.pending_output_mode = mode;
@@ -2276,26 +2515,40 @@ void handle_usb_command(const char *command) {
                        s_usb.rumble_stop_packets,
                        s_usb.report_rate_hz,
                        saved_output_mode());
-        config_save();
+        if (config_save() != ESP_OK) {
+            s_usb.pending_output_mode = s_usb.output_mode;
+            config_set_output_mode(s_usb.output_mode);
+            queue_feature_error("settings_save_failed");
+            return;
+        }
         ESP_LOGW(TAG, "USB mode saved for next boot current=%s pending=%s restart_required=%u",
                  config_output_mode_name(s_usb.output_mode),
                  config_output_mode_name(saved_output_mode()),
                  output_mode_restart_required() ? 1u : 0u);
         format_settings_json(json, sizeof(json), true);
         queue_feature_json(json);
+        if (output_mode_restart_required()) schedule_restart();
         return;
     }
     if (command_is(command, "usb reboot") || command_is(command, "usb restart")) {
         queue_feature_json("{\"ok\":true,\"profile\":\"ns2pro\",\"platform\":\"esp32s3\",\"rebooting\":true}");
         ESP_LOGW(TAG, "USB mode restart requested");
-        esp_restart();
+        schedule_restart();
         return;
     }
     queue_feature_error("unknown_usb_command");
 }
 
 void handle_settings_command(const char *command) {
-    static char json[512];
+    static char json[1024];
+    if (command_is(command, "settings reset") || command_is(command, "config reset")) {
+        ble_forget(); // retain the remembered address until its security bond is erased
+        s_usb.factory_reset_pending = true;
+        s_usb.factory_reset_error = 0;
+        s_usb.factory_reset_requested_us = esp_timer_get_time();
+        queue_feature_json("{\"ok\":true,\"reset_pending\":true}");
+        return;
+    }
     if (command_is(command, "settings") ||
         command_is(command, "settings status") ||
         command_is(command, "config") ||
@@ -2314,7 +2567,10 @@ void handle_settings_command(const char *command) {
                        s_usb.rumble_stop_packets,
                        s_usb.report_rate_hz,
                        saved_output_mode());
-        config_save();
+        if (config_save() != ESP_OK || !mapping_save()) {
+            queue_feature_error("settings_save_failed");
+            return;
+        }
         ESP_LOGW(TAG, "settings saved report_rate=%u raw=%u web_parse=%u rumble=%u current=%s pending=%s",
                  static_cast<unsigned>(s_usb.report_rate_hz),
                  s_usb.raw_passthrough ? 1u : 0u,
@@ -2419,7 +2675,8 @@ void handle_rumble_command(const char *command) {
         s_usb.rumble_hold_ms = static_cast<uint16_t>(clamp_int(static_cast<int>(hold), 20, 2000));
         s_usb.rumble_tick_ms = static_cast<uint16_t>(clamp_int(static_cast<int>(tick), 4, 100));
         s_usb.rumble_stop_packets = static_cast<uint8_t>(clamp_int(static_cast<int>(stops), 1, 10));
-    } else if (!command_is(command, "rumble config") &&
+    } else if (!command_is(command, "rumble") && !command_is(command, "rumble status") &&
+               !command_is(command, "rumble config") &&
                !command_has_prefix(command, "rumble tune") &&
                !command_has_prefix(command, "rumble hold") &&
                !command_has_prefix(command, "rumble motors") &&
@@ -2434,7 +2691,7 @@ void handle_rumble_command(const char *command) {
 }
 
 void handle_ns2_command(const char *command) {
-    static char json[1280];
+    static char json[3072];
     if (command_is(command, "ns2 status") || command_is(command, "status")) {
         format_ble_status_json(json, sizeof(json));
         queue_feature_json(json);
@@ -2496,12 +2753,30 @@ void handle_feature_command(const char *raw_command) {
         queue_feature_error("empty_command");
         return;
     }
+    static char mapping_json[2048];
+    if (mapping_command(command, mapping_json, sizeof(mapping_json))) {
+        queue_feature_json(mapping_json);
+        return;
+    }
+    if (command_is(command, "input status") || command_is(command, "input") ||
+        command_is(command, "input set ns2pro")) {
+        format_input_status_json(mapping_json, sizeof(mapping_json));
+        queue_feature_json(mapping_json);
+        return;
+    }
+    if (command_is(command, "reboot")) {
+        queue_feature_json("{\"ok\":true,\"rebooting\":true}");
+        schedule_restart();
+        return;
+    }
 
     if (command_is(command, "status") || command_has_prefix(command, "ns2")) {
         handle_ns2_command(command);
         return;
     }
     if (command_is(command, "usb status") ||
+        command_is(command, "audio status") ||
+        command_has_prefix(command, "role set") ||
         command_has_prefix(command, "usb") ||
         command_has_prefix(command, "report") ||
         command_has_prefix(command, "output mode")) {
@@ -2555,11 +2830,15 @@ void receive_feature_command(const uint8_t *payload, uint16_t payload_size) {
         payload_size--;
     }
 
-    const size_t copy_len = std::min<size_t>(payload_size, sizeof(s_usb.feature_last_command) - 1);
-    std::memcpy(s_usb.feature_last_command, payload, copy_len);
-    s_usb.feature_last_command[copy_len] = 0;
-    ESP_LOGW(TAG, "feature command: %s", s_usb.feature_last_command);
-    handle_feature_command(s_usb.feature_last_command);
+    {
+        FeatureGuard lock;
+        const size_t copy_len = std::min<size_t>(payload_size, sizeof(s_usb.feature_last_command) - 1);
+        std::memcpy(s_usb.feature_last_command, payload, copy_len);
+        s_usb.feature_last_command[copy_len] = 0;
+        s_usb.feature_reply_len = 0;
+        s_usb.feature_reply_offset = 0;
+        s_usb.legacy_command_pending = true;
+    }
     hold_feature_quiet();
 }
 
@@ -2569,6 +2848,7 @@ uint16_t build_feature_report(uint8_t *buffer, uint16_t reqlen) {
     }
     s_usb.feature_get_count++;
     hold_feature_quiet();
+    FeatureGuard lock;
     if (s_usb.feature_reply_len == 0) {
         char json[128];
         std::snprintf(json,
@@ -2634,12 +2914,54 @@ void usb_event_cb(tinyusb_event_t *event, void *arg) {
 
 } // namespace
 
+size_t usb_execute_manager_command(const char *command, char *out, size_t capacity) {
+    if (command == nullptr || out == nullptr || capacity == 0) return 0;
+    // Both NSM1 and legacy commands execute on the application task. The
+    // direct reply sink cannot be consumed by a concurrent legacy HID read.
+    out[0] = 0;
+    {
+        FeatureGuard lock;
+        s_direct_reply = out;
+        s_direct_reply_capacity = capacity;
+        s_direct_reply_task = xTaskGetCurrentTaskHandle();
+    }
+    handle_feature_command(command);
+    {
+        FeatureGuard lock;
+        s_direct_reply = nullptr;
+        s_direct_reply_capacity = 0;
+        s_direct_reply_task = nullptr;
+    }
+    return std::strlen(out);
+}
+
+manager::StatusCode usb_manager_request_mode(uint8_t personality) {
+    if (personality > static_cast<uint8_t>(OutputMode::DualSenseEdge))
+        return manager::StatusCode::InvalidArgument;
+    const OutputMode previous = config_output_mode();
+    const OutputMode desired = static_cast<OutputMode>(personality);
+    config_set_output_mode(desired);
+    if (config_save() != ESP_OK) {
+        config_set_output_mode(previous);
+        return manager::StatusCode::InternalError;
+    }
+    s_usb.pending_output_mode = desired;
+    s_usb.pending_output_mode_valid = true;
+    if (desired != s_usb.output_mode) schedule_restart();
+    return manager::StatusCode::Ok;
+}
+
 esp_err_t usb_start() {
     if (s_usb.started) {
         return ESP_OK;
     }
 
     usb_uac1_link_driver();
+    manager::init();
+    kStringDescriptor[3] = manager::device_id_hex();
+    kXInputStringDescriptor[3] = manager::device_id_hex();
+    kDualSenseStringDescriptor[3] = manager::device_id_hex();
+    kDualSenseEdgeStringDescriptor[3] = manager::device_id_hex();
     RuntimeConfig cfg_runtime;
     config_get(&cfg_runtime);
     s_usb.raw_passthrough = cfg_runtime.raw_passthrough;
@@ -2655,6 +2977,11 @@ esp_err_t usb_start() {
     s_usb.ds5_regular_right = 0;
     s_usb.ds5_regular_left = 0;
     reset_ds5_haptics_state();
+    if(s_host_feedback_queue==nullptr) {
+        s_host_feedback_queue=xQueueCreateStatic(1,sizeof(HostFeedbackPacket),
+            s_host_feedback_queue_buffer,&s_host_feedback_queue_storage);
+        ESP_RETURN_ON_FALSE(s_host_feedback_queue!=nullptr,ESP_ERR_NO_MEM,TAG,"host feedback queue allocation failed");
+    } else xQueueReset(s_host_feedback_queue);
     if (s_ds5_audio_queue == nullptr) {
         s_ds5_audio_queue = xQueueCreateStatic(
             kDs5AudioQueueDepth,
@@ -2667,6 +2994,8 @@ esp_err_t usb_start() {
     }
     set_report_rate(cfg_runtime.report_rate_hz == 0 ? kDefaultReportRateHz : cfg_runtime.report_rate_hz);
     tinyusb_config_t cfg = TINYUSB_CONFIG_FULL_SPEED(usb_event_cb, nullptr);
+    // esp_tinyusb 2.2 uses this field; the old TASK_STACK_SIZE Kconfig is ignored.
+    cfg.task.size = 8192;
     cfg.descriptor.device = current_device_descriptor();
     cfg.descriptor.string = current_string_descriptor();
     cfg.descriptor.string_count = current_string_descriptor_count();
@@ -2695,11 +3024,14 @@ void usb_note_uac1_interface(uint8_t interface_number, uint8_t alt_setting) {
 
 void usb_submit_dualsense_audio_packet(const uint8_t *data, uint16_t len) {
     if (data == nullptr || len == 0 || len > kDs5AudioPacketBytes ||
-        s_usb.output_mode != OutputMode::DualSense || s_ds5_audio_queue == nullptr) {
+        !is_sony_mode(s_usb.output_mode) || s_ds5_audio_queue == nullptr) {
         return;
     }
 
     Ds5AudioPacket packet{};
+    InputSnapshot input;
+    if(!input_get_snapshot(&input))return;
+    packet.stamp={input.source_epoch,static_cast<uint64_t>(esp_timer_get_time())};
     packet.len = len;
     std::memcpy(packet.data, data, len);
     if (xQueueSend(s_ds5_audio_queue, &packet, 0) == pdTRUE) {
@@ -2811,6 +3143,9 @@ uint8_t ds5_rms_to_status_strength(uint16_t rms) {
 }
 
 void process_ds5_haptics_window() {
+    const bool was_active = s_usb.ds5_haptic_left_low || s_usb.ds5_haptic_left_high ||
+                            s_usb.ds5_haptic_right_low || s_usb.ds5_haptic_right_high;
+    s_usb.audio_haptic_blocks++;
     ds5_analyze_side(
         s_usb.ds5_haptics_left_samples,
         &s_usb.ds5_haptic_left_low_freq,
@@ -2829,6 +3164,9 @@ void process_ds5_haptics_window() {
     s_usb.ds5_haptic_right_low = ds5_rms_to_status_strength(s_usb.ds5_haptic_right_low_rms);
     s_usb.ds5_haptic_right_high = ds5_rms_to_status_strength(s_usb.ds5_haptic_right_high_rms);
     update_ds5_rumble_mix("ds5_audio", 80);
+    s_usb.audio_ns2_updates++;
+    if (was_active && !s_usb.ds5_haptic_left_low && !s_usb.ds5_haptic_left_high &&
+        !s_usb.ds5_haptic_right_low && !s_usb.ds5_haptic_right_high) s_usb.audio_ns2_stops++;
 }
 
 void push_ds5_haptics_sample(int16_t left, int16_t right) {
@@ -2853,13 +3191,16 @@ void push_ds5_haptics_sample(int16_t left, int16_t right) {
 }
 
 void audio_task() {
-    if (s_usb.output_mode != OutputMode::DualSense || !s_usb.started || !tud_mounted() ||
+    if (!is_sony_mode(s_usb.output_mode) || !s_usb.started || !tud_mounted() ||
         s_ds5_audio_queue == nullptr) {
         return;
     }
 
     Ds5AudioPacket packet{};
     for (uint8_t queued = 0; queued < 8 && xQueueReceive(s_ds5_audio_queue, &packet, 0) == pdTRUE; queued++) {
+        InputSnapshot input;
+        input_get_snapshot(&input);
+        if(!feedback_matches_source(packet.stamp,input,esp_timer_get_time()))continue;
         s_usb.audio_out_packets++;
         s_usb.audio_out_bytes += packet.len;
         s_usb.audio_last_read = packet.len;
@@ -2905,8 +3246,64 @@ void audio_task() {
 }
 
 void usb_task() {
-    rumble_task();
-    audio_task();
+    char legacy_command[64] = {};
+    {
+        FeatureGuard lock;
+        if (s_usb.legacy_command_pending) {
+            std::memcpy(legacy_command, s_usb.feature_last_command, sizeof(legacy_command));
+            s_usb.legacy_command_pending = false;
+        }
+    }
+    if (legacy_command[0] != 0) handle_feature_command(legacy_command);
+    if (s_usb.factory_reset_pending) {
+        BleStats stats;
+        ble_get_stats(&stats);
+        if (ble_forget_complete()) {
+            s_usb.factory_reset_error = config_reset();
+            s_usb.factory_reset_pending = false;
+            if (s_usb.factory_reset_error == ESP_OK) schedule_restart();
+        } else if (esp_timer_get_time() - s_usb.factory_reset_requested_us > 10000000ULL) {
+            s_usb.factory_reset_error = stats.persist_error != 0 ? stats.persist_error : ESP_ERR_TIMEOUT;
+            s_usb.factory_reset_pending = false;
+        }
+    }
+    if (s_usb.restart_at_us != 0) {
+        const uint64_t now = esp_timer_get_time();
+        if (!s_usb.restart_detached && now + 350000ULL >= s_usb.restart_at_us) {
+            tud_disconnect();
+            s_usb.restart_detached = true;
+        }
+        if (now >= s_usb.restart_at_us) esp_restart();
+        if (s_usb.restart_detached) return;
+    }
+    InputSnapshot input;
+    const bool live = input_get_snapshot(&input);
+    if (input.source_epoch != s_usb.feedback_source_epoch || live != s_usb.feedback_input_live) {
+        stop_rumble();
+        s_usb.ds5_regular_right = 0;
+        s_usb.ds5_regular_left = 0;
+        reset_ds5_haptics_state();
+        if(s_host_feedback_queue!=nullptr)xQueueReset(s_host_feedback_queue);
+        if (s_ds5_audio_queue != nullptr) xQueueReset(s_ds5_audio_queue);
+        s_usb.feedback_source_epoch = input.source_epoch;
+        s_usb.feedback_input_live = live;
+        s_usb.input_transition_pending = true;
+        s_usb.last_reported_input_updates = 0;
+        s_usb.next_report_us = 0;
+    }
+    if (live) {
+        process_host_feedback();
+        rumble_task();
+        audio_task();
+    } else {
+        // Do not replay a host effect or queued audio from a disconnected
+        // source after the next controller connects.
+        s_usb.rumble_active = false;
+        s_usb.rumble_until_us = 0;
+        rumble_task(); // flush transition stop packets to a still-connected peer
+        if (s_ds5_audio_queue != nullptr) xQueueReset(s_ds5_audio_queue);
+        if(s_host_feedback_queue!=nullptr)xQueueReset(s_host_feedback_queue);
+    }
 
     if (!s_usb.started || !tud_mounted()) {
         return;
@@ -2923,14 +3320,17 @@ void usb_task() {
         return;
     }
 
-    InputSnapshot input;
-    const bool live = input_get_snapshot(&input) && input_last_age_ms() < 500;
     check_mode_combo(&input, live, now);
+    if (live) {
+        MappingConfig mapping;
+        mapping_get(&mapping);
+        mapping_apply(mapping, &input, is_sony_mode(s_usb.output_mode));
+    }
     const uint32_t input_updates = live ? input.updates : 0;
     const bool new_input = live && input_updates != s_usb.last_reported_input_updates;
     const bool keepalive_due = s_usb.report_last_sent_us == 0 ||
                                now - s_usb.report_last_sent_us >= kUsbKeepaliveIntervalUs;
-    if (!new_input && !keepalive_due) {
+    if (!new_input && !keepalive_due && !s_usb.input_transition_pending) {
         return;
     }
 
@@ -2941,7 +3341,7 @@ void usb_task() {
         fill_xinput_report(live ? &input : nullptr, report);
         sent = ns2_xinput_usb_send(report, sizeof(report));
     } else if (tud_hid_ready()) {
-        if (s_usb.output_mode == OutputMode::DualSense) {
+        if (is_sony_mode(s_usb.output_mode)) {
             uint8_t report[kDualSenseInputPayloadLen] = {};
             fill_dualsense_report(live ? &input : nullptr, report);
             sent = tud_hid_report(kDualSenseInputReportId, report, sizeof(report));
@@ -2952,6 +3352,7 @@ void usb_task() {
         }
     }
     if (sent) {
+        s_usb.input_transition_pending = false;
         s_usb.last_reported_input_updates = input_updates;
         s_usb.reports_sent++;
         if (s_usb.report_last_sent_us != 0) {
@@ -2995,7 +3396,7 @@ extern "C" uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
     if (ns2::is_manager_hid_instance(instance)) {
         return ns2::kManagerReportDescriptor;
     }
-    if (ns2::s_usb.output_mode == ns2::OutputMode::DualSense &&
+    if (ns2::is_sony_mode(ns2::s_usb.output_mode) &&
         ns2::is_gamepad_hid_instance(instance)) {
         return ns2::kDualSenseReportDescriptor;
     }
@@ -3007,6 +3408,13 @@ extern "C" uint16_t tud_hid_get_report_cb(uint8_t instance,
                                            hid_report_type_t report_type,
                                            uint8_t *buffer,
                                            uint16_t reqlen) {
+    if (report_type == HID_REPORT_TYPE_FEATURE && ns2::is_nsm_manager_hid_instance(instance) &&
+        report_id == ns2::manager::kFeatureReportId)
+        return ns2::manager::build_feature_response(buffer, reqlen);
+    if (report_type == HID_REPORT_TYPE_FEATURE && ns2::is_gamepad_hid_instance(instance) &&
+        ns2::is_sony_mode(ns2::s_usb.output_mode) && report_id != ns2::kUsbReportIdFeature)
+        return static_cast<uint16_t>(ns2::usb_sony_feature(report_id, buffer, reqlen,
+            ns2::manager::device_id() + ns2::manager::device_id_size() - 6));
     if (report_type == HID_REPORT_TYPE_FEATURE &&
         ns2::is_manager_hid_instance(instance) &&
         (report_id == 0 || report_id == ns2::kUsbReportIdFeature)) {
@@ -3014,13 +3422,13 @@ extern "C" uint16_t tud_hid_get_report_cb(uint8_t instance,
     }
     if (report_type == HID_REPORT_TYPE_FEATURE &&
         (ns2::s_usb.output_mode == ns2::OutputMode::Nintendo ||
-         ns2::s_usb.output_mode == ns2::OutputMode::DualSense) &&
+         ns2::is_sony_mode(ns2::s_usb.output_mode)) &&
         ns2::is_gamepad_hid_instance(instance) &&
         (report_id == 0 || report_id == ns2::kUsbReportIdFeature)) {
         return ns2::build_feature_report(buffer, reqlen);
     }
     if (report_type == HID_REPORT_TYPE_INPUT &&
-        ns2::s_usb.output_mode == ns2::OutputMode::DualSense &&
+        ns2::is_sony_mode(ns2::s_usb.output_mode) &&
         ns2::is_gamepad_hid_instance(instance) &&
         (report_id == 0 || report_id == ns2::kDualSenseInputReportId)) {
         uint8_t report[ns2::kDualSenseInputPayloadLen] = {};
@@ -3060,6 +3468,18 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance,
     ns2::s_usb.hid_last_type = static_cast<uint8_t>(report_type);
     ns2::s_usb.hid_last_len = bufsize;
 
+    if (ns2::is_nsm_manager_hid_instance(instance) &&
+        report_type == HID_REPORT_TYPE_FEATURE && effective_report_id == ns2::manager::kFeatureReportId) {
+            ns2::manager::RuntimeStatus status;
+            status.personality = static_cast<uint8_t>(ns2::s_usb.output_mode);
+            status.usb_mounted = ns2::s_usb.mounted;
+            status.usb_suspended = ns2::s_usb.suspended;
+            status.reports_sent = ns2::s_usb.reports_sent;
+            status.reports_failed = ns2::s_usb.reports_failed;
+            ns2::manager::receive_feature_request(payload, payload_size, status, ns2::usb_manager_request_mode);
+        return;
+    }
+
     if (ns2::is_manager_hid_instance(instance)) {
         if (report_type == HID_REPORT_TYPE_FEATURE &&
             effective_report_id == ns2::kUsbReportIdFeature) {
@@ -3070,7 +3490,7 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance,
 
     if (report_type == HID_REPORT_TYPE_FEATURE &&
         (ns2::s_usb.output_mode == ns2::OutputMode::Nintendo ||
-         ns2::s_usb.output_mode == ns2::OutputMode::DualSense) &&
+         ns2::is_sony_mode(ns2::s_usb.output_mode)) &&
         ns2::is_gamepad_hid_instance(instance) &&
         effective_report_id == ns2::kUsbReportIdFeature) {
         ns2::receive_feature_command(payload, payload_size);
@@ -3078,6 +3498,7 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance,
     }
 
     if (effective_report_id == ns2::kUsbReportIdOutput &&
+        report_type == HID_REPORT_TYPE_OUTPUT &&
         ns2::is_gamepad_hid_instance(instance)) {
         ns2::s_usb.hid_out_count++;
         uint8_t full_report[64] = {};
@@ -3087,9 +3508,11 @@ extern "C" void tud_hid_set_report_cb(uint8_t instance,
             std::memcpy(full_report + 1, payload, copy_len);
         }
         const uint16_t full_len = static_cast<uint16_t>(copy_len + 1);
-        if (!ns2::bridge_hid_output_to_ble(full_report, full_len)) {
-            ns2::bridge_ds5_output_to_ble(effective_report_id, payload, payload_size);
-        }
+        if(ns2::s_usb.output_mode==ns2::OutputMode::Nintendo &&
+           ns2::is_switch2_hid_rumble_report(full_report,full_len))
+            ns2::queue_host_feedback(ns2::HostFeedbackKind::Nintendo,full_report,full_len);
+        else if(ns2::is_sony_mode(ns2::s_usb.output_mode))
+            ns2::queue_host_feedback(ns2::HostFeedbackKind::Sony,payload,payload_size);
         ESP_LOGD(ns2::TAG, "output report type=%u size=%u", report_type, payload_size);
     }
 }
@@ -3098,7 +3521,7 @@ extern "C" void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *repo
     if (!ns2::is_gamepad_hid_instance(instance)) {
         return;
     }
-    const uint8_t expected_id = ns2::s_usb.output_mode == ns2::OutputMode::DualSense ?
+    const uint8_t expected_id = ns2::is_sony_mode(ns2::s_usb.output_mode) ?
         ns2::kDualSenseInputReportId :
         ns2::kUsbReportIdInput;
     if (report == nullptr || len == 0 || report[0] != expected_id) {
@@ -3212,14 +3635,16 @@ extern "C" void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bu
     ns2::s_usb.vendor_last_arg = cmd_len > 3 ? cmd[3] : 0;
     ns2::s_usb.vendor_last_address = ns2::command_address(cmd, cmd_len);
 
-    if (ns2::bridge_xinput_output_to_ble(cmd, cmd_len)) {
+    uint8_t left=0,right=0;
+    if (ns2::s_usb.output_mode==ns2::OutputMode::XInput &&
+        ns2::parse_xinput_rumble_out(cmd,cmd_len,&left,&right)) {
+        ns2::queue_host_feedback(ns2::HostFeedbackKind::XInput,cmd,cmd_len);
         ns2::s_usb.vendor_last_tx_len = 0;
         return;
     }
 
-    if (!ns2::bridge_hid_output_to_ble(cmd, cmd_len)) {
-        // Non-rumble vendor traffic falls through to the manager reply path.
-    }
+    if(ns2::s_usb.output_mode==ns2::OutputMode::Nintendo && ns2::is_switch2_hid_rumble_report(cmd,cmd_len))
+        ns2::queue_host_feedback(ns2::HostFeedbackKind::Nintendo,cmd,cmd_len);
 
     uint8_t reply[ns2::kBulkReplyMax];
     const size_t reply_len = ns2::build_vendor_reply(cmd, cmd_len, reply, sizeof(reply));
@@ -3259,5 +3684,7 @@ extern "C" void ns2_xinput_output_received(const uint8_t *data, uint16_t length)
     }
     ns2::s_usb.vendor_out_count++;
     ns2::s_usb.vendor_last_rx_len = length;
-    ns2::bridge_xinput_output_to_ble(data, length);
+    uint8_t left=0,right=0;
+    if(ns2::parse_xinput_rumble_out(data,length,&left,&right))
+        ns2::queue_host_feedback(ns2::HostFeedbackKind::XInput,data,length);
 }

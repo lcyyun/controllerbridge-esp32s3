@@ -3,7 +3,7 @@
 param(
     [string]$BuildDirectory,
 
-    [ValidateSet('n16r8')]
+    [ValidateSet('n4', 'n8', 'n8r2', 'n8r8', 'n16r8', 'esp32supermini')]
     [string]$Board = 'n16r8'
 )
 
@@ -13,12 +13,15 @@ Set-StrictMode -Version Latest
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
     throw 'BuildDirectory must be explicitly supplied; no build directory is selected automatically.'
 }
-if ($Board -cne 'n16r8') { throw 'Only the n16r8 board is supported.' }
+
 
 $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $BuildRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildDirectory)
 $DistRoot = Join-Path $RepositoryRoot 'dist'
-$FlashCapacity = 16MB
+$MemoryProfile = @{ n4=@(4,'none'); n8=@(8,'none'); n8r2=@(8,'quad'); n8r8=@(8,'octal'); n16r8=@(16,'octal'); esp32supermini=@(4,'quad') }[$Board]
+$FlashSizeMb = $MemoryProfile[0]
+$FlashCapacity = $FlashSizeMb * 1MB
+$FlashSize = "${FlashSizeMb}MB"
 
 function Get-SafeRelativePath([object]$Value) {
     if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value)) {
@@ -88,7 +91,7 @@ function Get-Offset([object]$Value) {
 }
 
 function Assert-FlashOptions([object[]]$Arguments) {
-    $expected = @{ '--flash_mode' = 'dio'; '--flash_size' = '16MB'; '--flash_freq' = '80m' }
+    $expected = @{ '--flash_mode' = 'dio'; '--flash_size' = $FlashSize; '--flash_freq' = '80m' }
     $seen = @{}
     if ($Arguments.Count -ne 6) { throw 'Unexpected write_flash arguments.' }
     for ($index = 0; $index -lt $Arguments.Count; $index += 2) {
@@ -102,18 +105,65 @@ function Assert-FlashOptions([object[]]$Arguments) {
     }
 }
 
-$cacheFile = Get-VerifiedItem $BuildRoot 'CMakeCache.txt'
-$cache = Get-Content -LiteralPath $cacheFile.FullName
-foreach ($setting in @{
-    NS2_ESP32S3_BOARD = $Board
-    IDF_TARGET = 'esp32s3'
-    CMAKE_PROJECT_NAME = 'ns2pro_bridge_esp32s3_n16r8'
-}.GetEnumerator()) {
-    $matchesForKey = @($cache | Select-String -Pattern "^$($setting.Key):[^=]+=(.*)$")
-    if ($matchesForKey.Count -ne 1 -or
-        $matchesForKey[0].Matches[0].Groups[1].Value -cne $setting.Value) {
-        throw "Build board/target proof failed: $($setting.Key) must be '$($setting.Value)'."
+function Assert-CompiledIdentity([IO.FileInfo]$File) {
+    # ESP-IDF 5.3.3: esp_image_header_t is 24 bytes, first segment header 8;
+    # esp_app_desc_t is 256 bytes at 0x20, with project_name[32] at offset 0x30.
+    # esp_app_format/CMakeLists.txt truncates PROJECT_NAME to 31 before compiling.
+    $bytes = [IO.File]::ReadAllBytes($File.FullName)
+    if ($bytes.Length -lt 0x120 -or $bytes[0] -ne 0xe9 -or
+        $bytes[1] -lt 1 -or $bytes[1] -gt 16 -or
+        $bytes[12] -ne 9 -or $bytes[13] -ne 0) {
+        throw 'Compiled application is not an ESP32-S3 image (header/chip mismatch).'
     }
+    $firstSegmentLength = [uint32]$bytes[28] -bor ([uint32]$bytes[29] -shl 8) -bor
+        ([uint32]$bytes[30] -shl 16) -bor ([uint32]$bytes[31] -shl 24)
+    if ($firstSegmentLength -lt 256 -or [long]$firstSegmentLength -gt ($bytes.Length - 32) -or
+        $bytes[0x20] -ne 0x32 -or $bytes[0x21] -ne 0x54 -or
+        $bytes[0x22] -ne 0xcd -or $bytes[0x23] -ne 0xab) {
+        throw 'Compiled application descriptor is missing or invalid (magic/segment mismatch).'
+    }
+    $project = "ns2pro_bridge_esp32s3_$Board"
+    $project = $project.Substring(0, [Math]::Min(31, $project.Length))
+    $expected = [Text.Encoding]::ASCII.GetBytes($project)
+    for ($index = 0; $index -lt 32; $index++) {
+        $value = if ($index -lt $expected.Length) { $expected[$index] } else { 0 }
+        if ($bytes[0x50 + $index] -ne $value) {
+            throw "Compiled project identity mismatch: expected '$project' for board '$Board'."
+        }
+    }
+}
+
+# CI artifacts need not contain CMakeCache.txt. When present it remains an
+# independent consistency check; the compiled application identity is mandatory.
+if (Test-Path -LiteralPath (Join-Path $BuildRoot 'CMakeCache.txt')) {
+    $cacheFile = Get-VerifiedItem $BuildRoot 'CMakeCache.txt'
+    $cache = Get-Content -LiteralPath $cacheFile.FullName
+    foreach ($setting in @{
+        NS2_ESP32S3_BOARD = $Board
+        IDF_TARGET = 'esp32s3'
+        CMAKE_PROJECT_NAME = "ns2pro_bridge_esp32s3_$Board"
+    }.GetEnumerator()) {
+        $matchesForKey = @($cache | Select-String -Pattern "^$($setting.Key):[^=]+=(.*)$")
+        if ($matchesForKey.Count -ne 1 -or
+            $matchesForKey[0].Matches[0].Groups[1].Value -cne $setting.Value) {
+            throw "Build board/target proof failed: $($setting.Key) must be '$($setting.Value)'."
+        }
+    }
+}
+
+$configFile = Get-VerifiedItem $BuildRoot 'sdkconfig'
+$config = Get-Content -LiteralPath $configFile.FullName -Raw
+if ($config -cnotmatch ('(?m)^CONFIG_ESPTOOLPY_FLASHSIZE="' + $FlashSizeMb + 'MB"\r?$')) {
+    throw 'sdkconfig flash size disagrees with board.'
+}
+if ($MemoryProfile[1] -ne 'none') {
+    $mode = if ($MemoryProfile[1] -eq 'octal') { 'OCT' } else { 'QUAD' }
+    if ($config -cnotmatch '(?m)^CONFIG_SPIRAM=y\r?$' -or
+        $config -cnotmatch ('(?m)^CONFIG_SPIRAM_MODE_' + $mode + '=y\r?$')) {
+        throw 'sdkconfig PSRAM mode disagrees with board.'
+    }
+} elseif ($config -cmatch '(?m)^CONFIG_SPIRAM=y\r?$') {
+    throw 'Unexpected sdkconfig PSRAM requirement.'
 }
 
 $jsonFile = Get-VerifiedItem $BuildRoot 'flasher_args.json'
@@ -127,7 +177,7 @@ $stub = Get-RequiredProperty $extra 'stub'
 if ($stub -isnot [bool] -or -not $stub) { throw 'Only the standard stub-enabled flash plan is supported.' }
 $settings = Get-RequiredProperty $flash 'flash_settings'
 Assert-String (Get-RequiredProperty $settings 'flash_mode') 'dio' 'flash_mode'
-Assert-String (Get-RequiredProperty $settings 'flash_size') '16MB' 'N16R8 flash_size'
+Assert-String (Get-RequiredProperty $settings 'flash_size') $FlashSize 'board flash_size'
 Assert-String (Get-RequiredProperty $settings 'flash_freq') '80m' 'flash_freq'
 Assert-FlashOptions (Get-RequiredProperty $flash 'write_flash_args')
 
@@ -155,7 +205,7 @@ foreach ($property in $files.PSObject.Properties) {
     if ($images.ContainsKey($offset)) { throw "Duplicate flash offset: $offset" }
     $file = Get-VerifiedItem $BuildRoot $relative
     if ($file.Length -le 0 -or ([long]$offset + $file.Length) -gt $FlashCapacity) {
-        throw "Empty image or image outside N16R8 flash capacity: $relative"
+        throw "Empty image or image outside selected board flash capacity: $relative"
     }
     Add-Copy $file $relative
     $images[$offset] = [pscustomobject]@{ Offset = $offset; Relative = $relative; Length = $file.Length }
@@ -181,7 +231,8 @@ foreach ($required in @{ bootloader = '0x0'; 'partition-table' = '0x8000'; app =
     }
 }
 Assert-String (Get-RequiredProperty (Get-RequiredProperty $flash 'app') 'file') `
-    'ns2pro_bridge_esp32s3_n16r8.bin' 'N16R8 application image'
+    "ns2pro_bridge_esp32s3_$Board.bin" "board application image"
+Assert-CompiledIdentity (Get-VerifiedItem $BuildRoot "ns2pro_bridge_esp32s3_$Board.bin")
 
 # flash_args is shipped verbatim, so validate it independently of the JSON plan.
 $tokens = @((Get-Content -LiteralPath $argsFile.FullName -Raw).Trim() -split '\s+')
@@ -215,7 +266,7 @@ if (-not (Test-Path -LiteralPath $DistRoot)) {
     New-Item -ItemType Directory -Path $DistRoot | Out-Null
 }
 Get-VerifiedItem $RepositoryRoot 'dist' -Directory | Out-Null
-$releaseName = 'release-n16r8-' + [Guid]::NewGuid().ToString('N')
+$releaseName = "release-$Board-" + [Guid]::NewGuid().ToString('N')
 $stage = Join-Path $DistRoot $releaseName
 $zipPath = "$stage.zip"
 $zipHashPath = "$zipPath.sha256"
@@ -233,11 +284,12 @@ try {
             throw "Source changed while packaging: $($copy.Relative)"
         }
     }
-    $instructions = @'
-ControllerBridge ESP32-S3 N16R8 raw firmware
+    $instructions = @"
+ControllerBridge ESP32-S3 $Board raw firmware
 
-Board: ESP32-S3, 16 MB DIO flash at 80 MHz, 8 MB Octal SPI PSRAM.
-This package was assembled from an N16R8 build, not hardware-tested here.
+Board profile: $Board; ESP32-S3, $FlashSizeMb MB DIO flash at 80 MHz.
+PSRAM settings are defined in boards/$Board/sdkconfig.defaults.
+This package was assembled from the selected board build, not hardware-tested here.
 Extract the entire ZIP before use. Do not flash only the application .bin.
 
 With Python esptool installed, from the extracted directory:
@@ -248,7 +300,7 @@ bootloader, partition table, and every image listed in flasher_args.json.
 The packaging script does not connect to or flash hardware.
 SHA256SUMS.txt covers every payload file except the checksum list itself.
 Preserve LICENSE, NOTICE.md, LICENSES/, and dependencies.lock.
-'@
+"@
     [IO.File]::WriteAllText((Join-Path $stage 'README.txt'), $instructions, [Text.Encoding]::ASCII)
     $sumLines = @(Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
         $relative = $_.FullName.Substring($stage.Length + 1).Replace('\', '/')

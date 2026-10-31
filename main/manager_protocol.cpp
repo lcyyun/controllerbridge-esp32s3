@@ -7,6 +7,9 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "ns2_usb.h"
 
 namespace ns2::manager {
 namespace {
@@ -22,7 +25,20 @@ constexpr std::array<uint8_t, 10> kDeviceIdPrefix = {
     'n', 's', '2', 'b', 'r', 'i', 'd', 'g', 'e', 0x01,
 };
 
+portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+struct Guard { Guard() { portENTER_CRITICAL(&s_lock); } ~Guard() { portEXIT_CRITICAL(&s_lock); } };
+
 struct ProtocolState {
+    std::array<uint8_t, kMaxRequestLength + 1> request{};
+    uint16_t request_length = 0;
+    uint16_t request_offset = 0;
+    uint32_t request_transaction = 0;
+    uint16_t request_opcode = 0;
+    int64_t request_time_us = 0;
+    bool request_ready = false;
+    bool processing = false;
+    RuntimeStatus runtime{};
+    PersonalityRequestHandler personality_handler = nullptr;
     std::array<uint8_t, 16> device_id{};
     std::array<char, 33> device_id_hex{};
     std::array<uint8_t, kMaxBodyLength> reply{};
@@ -141,6 +157,7 @@ void queue_response(uint32_t transaction_id,
                     StatusCode status,
                     const uint8_t *body,
                     size_t body_length) {
+    Guard guard;
     s_protocol.transaction_id = transaction_id;
     s_protocol.opcode = opcode;
     s_protocol.status = status;
@@ -190,12 +207,13 @@ void queue_hello(uint32_t transaction_id, uint16_t opcode, const RuntimeStatus &
     writer.unsigned_value(5);
     writer.unsigned_value(kProtocolMinor);
     writer.unsigned_value(6);
-    writer.array(5);
+    writer.array(6);
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Hello));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Capabilities));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Status));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Echo));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::SetPersonality));
+    writer.unsigned_value(static_cast<uint16_t>(Opcode::ExecuteCommand));
 
     if (!writer.ok()) {
         queue_error(transaction_id, opcode, StatusCode::InternalError, "hello_encode_failed");
@@ -209,12 +227,13 @@ void queue_capabilities(uint32_t transaction_id, uint16_t opcode) {
     CborWriter writer(body.data(), body.size());
     writer.map(3);
     writer.unsigned_value(0);
-    writer.array(5);
+    writer.array(6);
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Hello));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Capabilities));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Status));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::Echo));
     writer.unsigned_value(static_cast<uint16_t>(Opcode::SetPersonality));
+    writer.unsigned_value(static_cast<uint16_t>(Opcode::ExecuteCommand));
     writer.unsigned_value(1);
     writer.unsigned_value(kFeaturePayloadLength - kHeaderLength);
     writer.unsigned_value(2);
@@ -266,6 +285,9 @@ void init() {
     }
     s_protocol.device_id_hex.back() = 0;
     s_protocol.reply_ready = false;
+    s_protocol.request_ready = false;
+    s_protocol.request_offset = 0;
+    s_protocol.processing = false;
     ESP_LOGI(kTag, "Manager v1 device_id=%s", s_protocol.device_id_hex.data());
 }
 
@@ -285,36 +307,114 @@ void receive_feature_request(const uint8_t *payload,
                              uint16_t payload_size,
                              const RuntimeStatus &runtime_status,
                              PersonalityRequestHandler personality_handler) {
+    {
+        Guard guard;
+        // Preserve the active transaction even if a second client sends a
+        // malformed request during execution or before its reply is consumed.
+        if (s_protocol.processing || s_protocol.request_ready || s_protocol.reply_ready) return;
+    }
     uint32_t transaction_id = 0;
     uint16_t opcode = 0;
     if (payload != nullptr && payload_size >= 14) {
         transaction_id = read_le32(payload + 8);
         opcode = read_le16(payload + 12);
     }
+    const auto reject = [transaction_id, opcode](StatusCode status, const char *message) {
+        Guard guard;
+        s_protocol.request_ready = false;
+        s_protocol.request_length = 0;
+        s_protocol.request_offset = 0;
+        s_protocol.request_transaction = transaction_id;
+        s_protocol.request_opcode = opcode;
+        queue_error(transaction_id, opcode, status, message);
+    };
 
     if (payload == nullptr || payload_size < kHeaderLength ||
         std::memcmp(payload, kMagic, sizeof(kMagic)) != 0 ||
         payload[21] != kHeaderLength || payload[6] != kMessageRequest) {
-        queue_error(transaction_id, opcode, StatusCode::InvalidHeader, "invalid_header");
+        reject(StatusCode::InvalidHeader, "invalid_header");
         return;
     }
     if (payload[4] != kProtocolMajor) {
-        queue_error(transaction_id, opcode, StatusCode::UnsupportedVersion, "unsupported_version");
+        reject(StatusCode::UnsupportedVersion, "unsupported_version");
         return;
     }
 
     const uint16_t total_length = read_le16(payload + 16);
     const uint16_t offset = read_le16(payload + 18);
     const uint8_t chunk_length = payload[20];
-    if (offset != 0 || total_length != chunk_length ||
-        total_length > kFeaturePayloadLength - kHeaderLength ||
-        static_cast<size_t>(kHeaderLength + chunk_length) > payload_size ||
-        (payload[7] & kFlagMore) != 0) {
-        queue_error(transaction_id, opcode, StatusCode::InvalidFragment, "request_fragment_not_supported");
+    if (total_length > kMaxRequestLength) {
+        reject(StatusCode::PayloadTooLarge, "request_too_large");
         return;
     }
+    if (payload_size > kFeaturePayloadLength || chunk_length > kFeaturePayloadLength - kHeaderLength ||
+        offset > total_length || chunk_length > total_length - offset ||
+        static_cast<size_t>(kHeaderLength + chunk_length) > payload_size ||
+        ((payload[7] & kFlagMore) != 0) != (offset + chunk_length < total_length) ||
+        (payload[7] & ~kFlagMore) != 0 || read_le16(payload + 14) != 0 ||
+        (chunk_length == 0 && total_length != 0)) {
+        reject(StatusCode::InvalidFragment, "invalid_fragment");
+        return;
+    }
+    bool invalid = false;
+    {
+        Guard guard;
+        // One request at a time. A client must consume the reply before issuing
+        // the next command; GET reports Busy until the application loop runs.
+        if (s_protocol.processing || s_protocol.request_ready) return;
+        const int64_t now = esp_timer_get_time();
+        if (offset == 0) {
+            s_protocol.request_offset = 0;
+            s_protocol.request_length = total_length;
+            s_protocol.request_transaction = transaction_id;
+            s_protocol.request_opcode = opcode;
+            s_protocol.reply_ready = false;
+        }
+        invalid = offset != s_protocol.request_offset || total_length != s_protocol.request_length ||
+                  transaction_id != s_protocol.request_transaction || opcode != s_protocol.request_opcode ||
+                  (offset != 0 && now - s_protocol.request_time_us > 2000000);
+        if (!invalid) {
+            std::memcpy(s_protocol.request.data() + offset, payload + kHeaderLength, chunk_length);
+            s_protocol.request_offset += chunk_length;
+            s_protocol.request[s_protocol.request_offset] = 0;
+            s_protocol.request_time_us = now;
+            s_protocol.runtime = runtime_status;
+            s_protocol.personality_handler = personality_handler;
+            s_protocol.request_ready = s_protocol.request_offset == total_length;
+        } else {
+            s_protocol.request_offset = 0;
+            s_protocol.request_length = 0;
+        }
+    }
+    if (invalid) reject(StatusCode::InvalidFragment, "fragment_order");
+}
 
-    const uint8_t *body = payload + kHeaderLength;
+void task() {
+    uint32_t transaction_id;
+    uint16_t opcode;
+    uint16_t chunk_length;
+    RuntimeStatus runtime_status;
+    PersonalityRequestHandler personality_handler;
+    {
+        Guard guard;
+        if (!s_protocol.request_ready || s_protocol.processing) return;
+        s_protocol.request_ready = false;
+        s_protocol.processing = true;
+        transaction_id = s_protocol.request_transaction;
+        opcode = s_protocol.request_opcode;
+        chunk_length = s_protocol.request_length;
+        runtime_status = s_protocol.runtime;
+        personality_handler = s_protocol.personality_handler;
+    }
+    const uint8_t *body = s_protocol.request.data();
+    if ((opcode == static_cast<uint16_t>(Opcode::Hello) ||
+         opcode == static_cast<uint16_t>(Opcode::Capabilities) ||
+         opcode == static_cast<uint16_t>(Opcode::Status)) && chunk_length != 0) {
+        queue_error(transaction_id, opcode, StatusCode::InvalidArgument, "unexpected_body");
+        Guard guard;
+        s_protocol.processing = false;
+        return;
+    }
     switch (static_cast<Opcode>(opcode)) {
     case Opcode::Hello:
         queue_hello(transaction_id, opcode, runtime_status);
@@ -328,8 +428,27 @@ void receive_feature_request(const uint8_t *payload,
     case Opcode::Echo:
         queue_response(transaction_id, opcode, StatusCode::Ok, body, chunk_length);
         break;
+    case Opcode::ExecuteCommand: {
+        // Embedded NUL is rejected so transport validation and execution see
+        // exactly the same command. Commands are bounded before dispatch.
+        static std::array<char, kMaxBodyLength> response{};
+        if (chunk_length == 0 || std::memchr(body, 0, chunk_length) != nullptr) {
+            queue_error(transaction_id, opcode, StatusCode::InvalidArgument, "invalid_command");
+            break;
+        }
+        response.fill(0);
+        ns2::usb_execute_manager_command(reinterpret_cast<const char *>(body), response.data(), response.size());
+        const size_t length = std::strlen(response.data());
+        if (length == 0 || length >= response.size() - 1) {
+            queue_error(transaction_id, opcode, StatusCode::InternalError, "command_response_overflow");
+        } else {
+            queue_response(transaction_id, opcode, StatusCode::Ok,
+                           reinterpret_cast<const uint8_t *>(response.data()), length);
+        }
+        break;
+    }
     case Opcode::SetPersonality: {
-        if (chunk_length != 3 || body[0] != 0xa1 || body[1] != 0x00 || body[2] > 2 ||
+        if (chunk_length != 3 || body[0] != 0xa1 || body[1] != 0x00 || body[2] > 3 ||
             personality_handler == nullptr) {
             queue_error(transaction_id, opcode, StatusCode::InvalidArgument, "invalid_personality");
             break;
@@ -357,6 +476,7 @@ void receive_feature_request(const uint8_t *payload,
         queue_error(transaction_id, opcode, StatusCode::UnsupportedOpcode, "unsupported_opcode");
         break;
     }
+    { Guard guard; s_protocol.processing = false; }
 }
 
 uint16_t build_feature_response(uint8_t *buffer, uint16_t request_length) {
@@ -364,15 +484,26 @@ uint16_t build_feature_response(uint8_t *buffer, uint16_t request_length) {
         return 0;
     }
     std::memset(buffer, 0, request_length);
-    if (request_length < kHeaderLength) {
-        return request_length;
+    if (request_length <= kHeaderLength) {
+        return 0; // cannot make progress without at least one body byte
     }
+    Guard guard;
     if (!s_protocol.reply_ready) {
-        queue_error(0, 0, StatusCode::InvalidHeader, "no_pending_request");
+        // A short, non-consuming Busy response avoids blocking the USB task.
+        std::memcpy(buffer, kMagic, sizeof(kMagic));
+        buffer[4] = kProtocolMajor;
+        buffer[5] = kProtocolMinor;
+        buffer[6] = kMessageResponse;
+        buffer[7] = kFlagError;
+        write_le32(buffer + 8, s_protocol.request_transaction);
+        write_le16(buffer + 12, s_protocol.request_opcode);
+        write_le16(buffer + 14, static_cast<uint16_t>(StatusCode::Busy));
+        buffer[21] = kHeaderLength;
+        return request_length;
     }
 
     const uint16_t remaining = static_cast<uint16_t>(s_protocol.reply_length - s_protocol.reply_offset);
-    const uint16_t chunk_capacity = static_cast<uint16_t>(request_length - kHeaderLength);
+    const uint16_t chunk_capacity = static_cast<uint16_t>(std::min<size_t>(request_length - kHeaderLength, kFeaturePayloadLength - kHeaderLength));
     const uint8_t chunk_length = static_cast<uint8_t>(std::min<uint16_t>(remaining, chunk_capacity));
     const bool more = static_cast<uint16_t>(s_protocol.reply_offset + chunk_length) < s_protocol.reply_length;
 

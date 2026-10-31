@@ -1,6 +1,9 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "manager_protocol.cpp"
+        "ns2_mapping.cpp"
+        "ns2_mapping_core.cpp"
         "ns2_board.cpp"
         "ns2_ble.cpp"
         "ns2_config.cpp"
@@ -11,7 +14,7 @@ idf_component_register(
         "ns2_usb_xinput_driver.cpp"
         "ns2_usb_uac1.cpp"
     INCLUDE_DIRS "."
-    REQUIRES bt driver esp_tinyusb led_strip nvs_flash
+    REQUIRES bt driver esp_tinyusb led_strip nvs_flash mbedtls esp_app_format esp_psram
 )
 
 # esp_tinyusb v1.x rejects string descriptor index 0xEE before application

@@ -28,4 +28,26 @@ void format_ble_addr(const uint8_t addr[6], char *out, size_t out_len);
 
 const uint8_t *fd2_notify_uuid_be();
 
+// Shared, host-testable reconnect decisions. The NimBLE event worker owns the
+// mutable state; callback events only update it or schedule the next action.
+bool ble_scan_allowed(bool synced, bool stay_disconnected, bool connecting,
+                      bool connected, bool scanning, bool auto_connect,
+                      bool manual_scan, bool pairing);
+bool ble_candidate_allowed(bool likely_controller, bool saved_match,
+                           bool has_saved_target, bool pairing, int rssi);
+uint64_t ble_retry_delay_us(uint8_t failures);
+
+struct ForgetProgress {
+    bool processed = false;
+    bool settings_pending = false;
+    bool pairing_pending = false;
+    bool bond_pending = false;
+    bool saved_target = false;
+    bool pairing_key = false;
+    int storage_error = 0;
+    int bond_error = 0; // independent of settings saves; only cleanup clears it
+};
+// Completion depends on durable cleanup, not whether Bluetooth could start.
+bool ble_forget_is_complete(const ForgetProgress &progress);
+
 } // namespace ns2

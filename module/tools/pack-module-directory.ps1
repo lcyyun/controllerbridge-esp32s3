@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'package-paths.ps1')
+. (Join-Path $PSScriptRoot 'esp-flash-manifest.ps1')
 
 $source = Get-SafeFullPath $SourceDirectory
 if (-not (Test-Path -LiteralPath $source -PathType Container)) {
@@ -70,7 +71,7 @@ foreach ($board in @($manifest.boards)) {
 
 foreach ($firmware in @($manifest.firmware)) {
     $method = [string]$firmware.flashMethod
-    if ($method -notin @('None', 'PicoUf2', 'SifliSerial')) {
+    if ($method -notin @('None', 'PicoUf2', 'SifliSerial', 'EspressifSerial')) {
         throw "Unsupported firmware flashMethod: $method"
     }
     foreach ($boardId in @($firmware.boardIds)) {
@@ -88,6 +89,10 @@ foreach ($firmware in @($manifest.firmware)) {
     $artifact = Join-SafePath $source $relative
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "Firmware artifact is missing or outside the module: $relative"
+    }
+    if ($method -eq 'EspressifSerial') {
+        $esp = Test-EspFlashManifest $artifact
+        if (@($firmware.boardIds).Count -ne 1 -or $firmware.boardIds[0] -cne "esp32s3-$($esp.board)") { throw 'ESP firmware board mismatch.' }
     }
     if ($method -eq 'SifliSerial') {
         $parameters = Get-Content -LiteralPath $artifact -Raw | ConvertFrom-Json

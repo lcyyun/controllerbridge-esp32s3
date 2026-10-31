@@ -55,6 +55,8 @@ OutputMode next_mode(OutputMode mode) {
     case OutputMode::XInput:
         return OutputMode::DualSense;
     case OutputMode::DualSense:
+        return OutputMode::DualSenseEdge;
+    case OutputMode::DualSenseEdge:
     default:
         return OutputMode::Nintendo;
     }
@@ -129,6 +131,8 @@ Rgb mode_color(OutputMode mode) {
         return {kLedBrightness, 0, 0};
     case OutputMode::DualSense:
         return {0, 0, kLedBrightness};
+    case OutputMode::DualSenseEdge:
+        return {kLedBrightness, 0, kLedBrightness};
     case OutputMode::XInput:
         return {0, kLedBrightness, 0};
     default:

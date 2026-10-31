@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($ExpectedId -eq 'esp32s3-ns2-bridge') { throw 'ESP32-S3 requires complete images; use module/package.ps1 -BuildDirectories <built profiles>.' }
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'package-paths.ps1')
 $moduleRoot = Get-SafeFullPath (Join-Path $PSScriptRoot '..')

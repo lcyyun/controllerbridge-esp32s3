@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <cstdint>
 
 namespace ns2 {
 
@@ -15,6 +16,13 @@ struct BleStats {
     bool auto_connect = true;
     bool saved_target_valid = false;
     bool pair_mode = false;
+    bool host_synced = false;
+    bool persist_pending = false;
+    int persist_error = 0;
+    bool pairing_active = false;
+    bool pairing_key_saved = false;
+    bool encrypted = false;
+    uint32_t pairing_failures = 0;
     uint8_t local_addr[6] = {};
     uint8_t saved_addr[6] = {};
     uint8_t saved_addr_type = 0;
@@ -60,12 +68,15 @@ struct BleStats {
 esp_err_t ble_start();
 void ble_task();
 void ble_get_stats(BleStats *out);
-bool ble_send_rumble(const uint8_t *data, uint16_t len);
+bool ble_send_rumble(const uint8_t *data, uint16_t len, uint32_t source_epoch);
 void ble_start_scan();
 void ble_pair();
 void ble_reconnect();
 void ble_disconnect();
 void ble_forget();
+// True only after the latest forget request and all NVS/key erasures complete.
+// Check BleStats.persist_error when waiting for a failed erase.
+bool ble_forget_complete();
 void ble_set_auto_connect(bool enabled);
 
 } // namespace ns2

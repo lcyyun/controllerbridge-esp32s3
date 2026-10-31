@@ -10,7 +10,9 @@
 #include "ns2_ble.h"
 #include "ns2_board.h"
 #include "ns2_config.h"
+#include "ns2_mapping.h"
 #include "ns2_usb.h"
+#include "manager_protocol.h"
 
 namespace {
 
@@ -22,14 +24,19 @@ extern "C" void app_main(void) {
     esp_chip_info_t chip{};
     esp_chip_info(&chip);
 
-    ESP_LOGI(TAG, "ns2pro-bridge ESP32-S3 scaffold booted");
+    ESP_LOGI(TAG, "ns2pro-bridge ESP32-S3 firmware booted");
     ESP_LOGI(TAG,
              "chip cores=%d features=0x%lx revision=%d",
              chip.cores,
              static_cast<unsigned long>(chip.features),
              chip.revision);
-    ESP_ERROR_CHECK(ns2::config_init());
+    const esp_err_t config_rc = ns2::config_init();
+    if (config_rc != ESP_OK) {
+        ns2::mapping_init(); // safe defaults if the NVS namespace is unavailable
+        ESP_LOGE(TAG, "Settings unavailable: %s; keeping USB diagnostics alive", esp_err_to_name(config_rc));
+    }
     ESP_ERROR_CHECK(ns2::board_controls_init());
+    ns2::manager::init();
     const esp_err_t usb_rc = ns2::usb_start();
     if (usb_rc != ESP_OK) {
         ESP_LOGE(TAG,
@@ -49,6 +56,7 @@ extern "C" void app_main(void) {
     while (true) {
         ns2::ble_task();
         ns2::usb_task();
+        ns2::manager::task();
         ns2::board_controls_task();
         vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(1)));
     }

@@ -27,6 +27,7 @@ DEVICE_IDS = (
     (0x1209, 0x4E53),  # compatible XInput + manager HID
     (0x045E, 0x028E),  # strict XInput identity
     (0x054C, 0x0CE6),  # DualSense
+    (0x054C, 0x0DF2),  # DualSense Edge
 )
 
 
@@ -147,7 +148,7 @@ def main() -> int:
     sub.add_parser("reboot")
     sub.add_parser("xinput-test")
     mode_parser = sub.add_parser("mode")
-    mode_parser.add_argument("mode", choices=("nintendo", "xinput", "dualsense"))
+    mode_parser.add_argument("mode", choices=("nintendo", "xinput", "dualsense", "dualsense-edge"))
     mode_parser.add_argument("--reboot", action="store_true")
     command_parser = sub.add_parser("command")
     command_parser.add_argument("command")

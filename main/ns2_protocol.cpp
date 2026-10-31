@@ -5,6 +5,28 @@
 #include <cstring>
 
 namespace ns2 {
+bool ble_forget_is_complete(const ForgetProgress &p) {
+    return p.processed && !p.settings_pending && !p.pairing_pending && !p.bond_pending &&
+           !p.saved_target && !p.pairing_key && p.storage_error == 0 && p.bond_error == 0;
+}
+
+bool ble_scan_allowed(bool synced, bool stay_disconnected, bool connecting,
+                      bool connected, bool scanning, bool auto_connect,
+                      bool manual_scan, bool pairing) {
+    return synced && !stay_disconnected && !connecting && !connected && !scanning &&
+           (auto_connect || manual_scan || pairing);
+}
+
+bool ble_candidate_allowed(bool likely_controller, bool saved_match,
+                           bool has_saved_target, bool pairing, int rssi) {
+    return saved_match || (likely_controller && (pairing || !has_saved_target) && rssi >= -82);
+}
+
+uint64_t ble_retry_delay_us(uint8_t failures) {
+    const uint64_t delay = 1200000ULL << std::min<uint8_t>(failures, 4);
+    return std::min<uint64_t>(delay, 10000000ULL);
+}
+
 namespace {
 
 constexpr uint8_t kPairableMfgPrefix[] = {0x53, 0x05, 0x01, 0x00, 0x03, 0x7e};

@@ -6,13 +6,16 @@ param(
 
     [string]$Port = 'COM12',
 
-    [ValidateSet('nintendo', 'xinput', 'dualsense')]
+    [ValidateSet('nintendo', 'xinput', 'dualsense', 'dualsense-edge')]
     [string]$Mode,
 
     [ValidateSet('n4', 'n8', 'n8r2', 'n8r8', 'n16r8', 'esp32supermini')]
     [string]$Board = 'n16r8',
 
-    [string]$BuildDir
+    [string]$BuildDir,
+
+    [ValidateRange(1, 32)]
+    [int]$Jobs = 4
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,8 +28,8 @@ $BuildPath = if ([IO.Path]::IsPathRooted($BuildDir)) {
 } else {
     [IO.Path]::GetFullPath((Join-Path $ProjectDir $BuildDir))
 }
-$IdfPath = if ($env:IDF_PATH) { $env:IDF_PATH } else { 'C:\Espressif\frameworks\esp-idf-v5.3.3' }
-$ToolsPath = if ($env:IDF_TOOLS_PATH) { $env:IDF_TOOLS_PATH } else { Join-Path $env:USERPROFILE '.espressif' }
+$IdfPath = if ($env:IDF_PATH) { $env:IDF_PATH } elseif (Test-Path (Join-Path $ProjectDir '.cache/esp-idf-v5.3.3/tools/idf.py')) { Join-Path $ProjectDir '.cache/esp-idf-v5.3.3' } else { 'C:\Espressif\frameworks\esp-idf-v5.3.3' }
+$ToolsPath = if ($env:IDF_TOOLS_PATH) { $env:IDF_TOOLS_PATH } elseif (Test-Path (Join-Path $ProjectDir '.cache/idf-tools')) { Join-Path $ProjectDir '.cache/idf-tools' } else { Join-Path $env:USERPROFILE '.espressif' }
 $PythonEnv = if ($env:IDF_PYTHON_ENV_PATH) {
     $env:IDF_PYTHON_ENV_PATH
 } else {
@@ -70,22 +73,29 @@ function Invoke-Manager([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "manager command failed with exit code $LASTEXITCODE" }
 }
 
+function Invoke-Build {
+    # Bound compiler concurrency when several platform builds share a host.
+    Invoke-Idf @('reconfigure')
+    & cmake --build $BuildPath --parallel $Jobs
+    if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
+}
+
 switch ($Action) {
-    'build'       { Invoke-Idf @('build') }
+    'build'       { Invoke-Build }
     'flash'       { Invoke-Idf @('-p', $Port, '-b', '460800', 'flash') }
-    'build-flash' { Invoke-Idf @('-p', $Port, '-b', '460800', 'build', 'flash') }
+    'build-flash' { Invoke-Build; Invoke-Idf @('-p', $Port, '-b', '460800', 'flash') }
     'monitor'     { Invoke-Idf @('-p', $Port, 'monitor') }
     'status'      { Invoke-Manager @('status') }
     'reboot'      { Invoke-Manager @('reboot') }
     'xinput-test' { Invoke-Manager @('xinput-test') }
     'mode' {
-        if (-not $Mode) { throw 'mode action requires -Mode nintendo|xinput|dualsense' }
+        if (-not $Mode) { throw 'mode action requires -Mode nintendo|xinput|dualsense|dualsense-edge' }
         Invoke-Manager @('mode', $Mode, '--reboot')
     }
     'devices' {
         Get-PnpDevice -PresentOnly |
             Where-Object {
-                $_.InstanceId -match 'VID_(057E&PID_2069|1209&PID_4E53|054C&PID_0CE6)' -or
+                $_.InstanceId -match 'VID_(057E&PID_2069|1209&PID_4E53|054C&PID_(0CE6|0DF2))' -or
                 $_.FriendlyName -match 'NS2Pro|Xbox 360 Controller|DualSense'
             } |
             Select-Object Status, Class, FriendlyName, InstanceId, Problem |

@@ -16,36 +16,51 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function New-Fixture([string]$Name) {
+function New-Fixture([string]$Name, [string]$Board = 'n16r8', [switch]$NoCache) {
     $root = Join-Path $testRoot $Name
+    $profile = @{ n4=@(4,'none'); n8=@(8,'none'); n8r2=@(8,'quad'); n8r8=@(8,'octal'); n16r8=@(16,'octal'); esp32supermini=@(4,'quad') }[$Board]
+    $flashSize = "$($profile[0])MB"
+    $project = "ns2pro_bridge_esp32s3_$Board"
+    $application = "$project.bin"
     New-Item -ItemType Directory -Path (Join-Path $root 'bootloader') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $root 'partition_table') -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $root 'bootloader/bootloader.bin'), [byte[]](1, 2, 3))
     [IO.File]::WriteAllBytes((Join-Path $root 'partition_table/partition-table.bin'), [byte[]](4, 5, 6))
-    [IO.File]::WriteAllBytes((Join-Path $root 'ns2pro_bridge_esp32s3_n16r8.bin'), [byte[]](7, 8, 9))
-    [IO.File]::WriteAllLines((Join-Path $root 'CMakeCache.txt'), @(
-        'NS2_ESP32S3_BOARD:STRING=n16r8'
+    $image = [byte[]]::new(512)
+    $image[0] = 0xe9; $image[1] = 1; $image[12] = 9
+    [BitConverter]::GetBytes([uint32]256).CopyTo($image, 28)
+    ([byte[]](0x32,0x54,0xcd,0xab)).CopyTo($image,0x20)
+    [Text.Encoding]::ASCII.GetBytes($project.Substring(0,[Math]::Min(31,$project.Length))).CopyTo($image,0x50)
+    [IO.File]::WriteAllBytes((Join-Path $root $application), $image)
+    if (-not $NoCache) { [IO.File]::WriteAllLines((Join-Path $root 'CMakeCache.txt'), @(
+        "NS2_ESP32S3_BOARD:STRING=$Board"
         'IDF_TARGET:STRING=esp32s3'
-        'CMAKE_PROJECT_NAME:STATIC=ns2pro_bridge_esp32s3_n16r8'
-    ))
+        "CMAKE_PROJECT_NAME:STATIC=$project"
+    )) }
+    $config = @("CONFIG_ESPTOOLPY_FLASHSIZE=`"$flashSize`"")
+    if ($profile[1] -ne 'none') {
+        $mode = if ($profile[1] -eq 'octal') { 'OCT' } else { 'QUAD' }
+        $config += @('CONFIG_SPIRAM=y', "CONFIG_SPIRAM_MODE_$mode=y")
+    }
+    [IO.File]::WriteAllLines((Join-Path $root 'sdkconfig'), $config)
     $flash = [ordered]@{
-        write_flash_args = @('--flash_mode', 'dio', '--flash_size', '16MB', '--flash_freq', '80m')
-        flash_settings = @{ flash_mode = 'dio'; flash_size = '16MB'; flash_freq = '80m' }
+        write_flash_args = @('--flash_mode', 'dio', '--flash_size', $flashSize, '--flash_freq', '80m')
+        flash_settings = @{ flash_mode = 'dio'; flash_size = $flashSize; flash_freq = '80m' }
         flash_files = [ordered]@{
             '0x0' = 'bootloader/bootloader.bin'
             '0x8000' = 'partition_table/partition-table.bin'
-            '0x10000' = 'ns2pro_bridge_esp32s3_n16r8.bin'
+            '0x10000' = $application
         }
         bootloader = @{ offset = '0x0'; file = 'bootloader/bootloader.bin'; encrypted = 'false' }
         'partition-table' = @{ offset = '0x8000'; file = 'partition_table/partition-table.bin'; encrypted = 'false' }
-        app = @{ offset = '0x10000'; file = 'ns2pro_bridge_esp32s3_n16r8.bin'; encrypted = 'false' }
+        app = @{ offset = '0x10000'; file = $application; encrypted = 'false' }
         extra_esptool_args = @{ chip = 'esp32s3'; before = 'default_reset'; after = 'hard_reset'; stub = $true }
     }
     Write-FlashJson $root $flash
     [IO.File]::WriteAllLines((Join-Path $root 'flash_args'), @(
-        '--flash_mode dio --flash_freq 80m --flash_size 16MB'
+        "--flash_mode dio --flash_freq 80m --flash_size $flashSize"
         '0x0 bootloader/bootloader.bin'
-        '0x10000 ns2pro_bridge_esp32s3_n16r8.bin'
+        "0x10000 $application"
         '0x8000 partition_table/partition-table.bin'
     ))
     return [pscustomobject]@{ Root = $root; Flash = $flash }
@@ -79,14 +94,65 @@ try {
 
     Assert-Rejected 'explicit build directory' { & $packageScript } 'explicitly supplied'
     Assert-Rejected 'unsupported board option' {
-        & $packageScript -BuildDirectory $testRoot -Board n4
-    } 'n16r8'
+        & $packageScript -BuildDirectory $testRoot -Board unknown
+    } 'ValidateSet|validation|unknown'
 
     $fixture = New-Fixture 'wrong-board'
     [IO.File]::WriteAllText((Join-Path $fixture.Root 'CMakeCache.txt'), 'NS2_ESP32S3_BOARD:STRING=n8r8')
     Assert-Rejected 'wrong cached board' {
         & $packageScript -BuildDirectory $fixture.Root
     } 'proof failed'
+
+    foreach ($fault in @('image-magic','chip','descriptor-magic','project','renamed-board','unterminated-project','short-image')) {
+        $fixture = New-Fixture "compiled-$fault" -NoCache
+        $appPath = Join-Path $fixture.Root 'ns2pro_bridge_esp32s3_n16r8.bin'
+        $image = [IO.File]::ReadAllBytes($appPath)
+        switch ($fault) {
+            'image-magic' { $image[0] = 0 }
+            'chip' { $image[12] = 0 }
+            'descriptor-magic' { $image[0x20] = 0 }
+            'project' { $image[0x50] = [byte][char]'X' }
+            'renamed-board' {
+                [Array]::Clear($image,0x50,32)
+                [Text.Encoding]::ASCII.GetBytes('ns2pro_bridge_esp32s3_n8r8').CopyTo($image,0x50)
+            }
+            'unterminated-project' { $image[0x6f] = [byte][char]'X' }
+            'short-image' { $image = [byte[]](0xe9,1,0) }
+        }
+        [IO.File]::WriteAllBytes($appPath,$image)
+        Assert-Rejected "compiled $fault without cache" {
+            & $packageScript -BuildDirectory $fixture.Root
+        } 'Compiled application|Compiled project identity'
+    }
+    $fixture = New-Fixture 'compiled-mismatch-with-cache'
+    $appPath = Join-Path $fixture.Root 'ns2pro_bridge_esp32s3_n16r8.bin'
+    $image = [IO.File]::ReadAllBytes($appPath); $image[0x50] = 0
+    [IO.File]::WriteAllBytes($appPath,$image)
+    Assert-Rejected 'cache cannot replace compiled identity' {
+        & $packageScript -BuildDirectory $fixture.Root
+    } 'Compiled project identity'
+
+    foreach ($fault in @('missing','flash','psram')) {
+        $fixture = New-Fixture "config-$fault" -NoCache
+        $configPath = Join-Path $fixture.Root 'sdkconfig'
+        switch ($fault) {
+            'missing' { Remove-Item -LiteralPath $configPath }
+            'flash' { [IO.File]::WriteAllText($configPath,'CONFIG_ESPTOOLPY_FLASHSIZE="8MB"') }
+            'psram' { [IO.File]::WriteAllText($configPath,'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"') }
+        }
+        Assert-Rejected "sdkconfig $fault without cache" {
+            & $packageScript -BuildDirectory $fixture.Root
+        } 'sdkconfig'
+    }
+
+    foreach ($board in @('n4','n8','n8r2','n8r8','n16r8','esp32supermini')) {
+        $fixture = New-Fixture "cacheless-$board" -Board $board -NoCache
+        $result = & $packageScript -BuildDirectory $fixture.Root -Board $board
+        foreach ($path in @($result.StageDirectory,$result.ZipPath,$result.ChecksumFile)) { $cleanup.Add($path) }
+        Assert-True ($result.Board -ceq $board) 'Cache-less compiled board identity was not retained.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Root 'CMakeCache.txt'))) 'Packager fabricated a CMake cache.'
+        $passes++
+    }
 
     foreach ($field in @('chip', 'flash_size')) {
         $fixture = New-Fixture "wrong-$field"
@@ -163,7 +229,7 @@ finally {
         $fullPath = [IO.Path]::GetFullPath($path)
         $leaf = Split-Path -Leaf $fullPath
         if ((Split-Path -Parent $fullPath) -cne $distRoot -or
-            ($fullPath -cne $testRoot -and $leaf -notmatch '^release-n16r8-[0-9a-f]{32}(\.zip(\.sha256)?)?$')) {
+            ($fullPath -cne $testRoot -and $leaf -notmatch '^release-(n4|n8|n8r2|n8r8|n16r8|esp32supermini)-[0-9a-f]{32}(\.zip(\.sha256)?)?$')) {
             throw "Refusing cleanup outside test-owned dist paths: $path"
         }
         if (Test-Path -LiteralPath $fullPath) { Remove-Item -LiteralPath $fullPath -Recurse -Force }

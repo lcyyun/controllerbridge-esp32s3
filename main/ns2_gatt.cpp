@@ -4,6 +4,60 @@
 #include <cstring>
 
 namespace ns2 {
+void gatt_derive_pair_key(const uint8_t host[16], const uint8_t peer[16], uint8_t ltk[16]) {
+    for (size_t i = 0; i < 16; ++i) ltk[i] = host[i] ^ peer[i];
+}
+
+void gatt_pair_challenge_inputs(const uint8_t ltk[16], const uint8_t challenge[16],
+                                uint8_t key_be[16], uint8_t challenge_be[16]) {
+    for (size_t i = 0; i < 16; ++i) {
+        key_be[i] = ltk[15 - i];
+        challenge_be[i] = challenge[15 - i];
+    }
+}
+
+bool gatt_pair_challenge_matches(const uint8_t expected[16], const uint8_t actual[16]) {
+    uint8_t different = 0;
+    for (size_t i = 0; i < 16; ++i) different |= expected[i] ^ actual[i];
+    return different == 0;
+}
+
+bool gatt_pairing_record_valid(const PairingRecord &record, size_t size) {
+    if (size != sizeof(record) || record.magic != 0x3150324e || record.valid != 1 || record.addr_type > 3) return false;
+    uint8_t address_bits = 0, key_bits = 0;
+    for (const uint8_t value : record.addr) address_bits |= value;
+    for (const uint8_t value : record.ltk) key_bits |= value;
+    return address_bits != 0 && key_bits != 0;
+}
+
+size_t gatt_build_pair_command(uint8_t *out, size_t capacity, uint8_t subcommand,
+                               const uint8_t *value, size_t value_len) {
+    const size_t required = subcommand == kPairAddress ? 12u :
+        (subcommand == kPairKey || subcommand == kPairChallenge) ? 16u : 0u;
+    if (subcommand != kPairAddress && subcommand != kPairKey &&
+        subcommand != kPairChallenge && subcommand != kPairFinalize) return 0;
+    const size_t payload_len = required + (subcommand == kPairAddress ? 2u : 1u);
+    if (!out || capacity < 8 + payload_len || value_len != required || (required && !value)) return 0;
+    std::memset(out, 0, 8 + payload_len);
+    out[0] = 0x15; out[1] = 0x91; out[2] = 0x01; out[3] = subcommand;
+    out[5] = static_cast<uint8_t>(payload_len);
+    if (subcommand == kPairAddress) out[9] = 0x02;
+    if (required) std::memcpy(out + (subcommand == kPairAddress ? 10 : 9), value, required);
+    return 8 + payload_len;
+}
+
+bool gatt_parse_pair_response(const uint8_t *data, size_t len, uint8_t expected,
+                              const uint8_t **payload) {
+    if (payload) *payload = nullptr;
+    if (expected != kPairAddress && expected != kPairKey && expected != kPairChallenge && expected != kPairFinalize) return false;
+    const size_t required = expected == kPairAddress ? 9u :
+        (expected == kPairKey || expected == kPairChallenge) ? 17u : 1u;
+    if (!data || len < 8 + required || data[0] != 0x15 || data[1] != 0x01 ||
+        data[2] != 0x01 || data[3] != expected || data[8] != 0x01) return false;
+    if (payload) *payload = data + 8;
+    return true;
+}
+
 namespace {
 
 const uint8_t kUuidNotifyFd2[kUuid128Len] = {

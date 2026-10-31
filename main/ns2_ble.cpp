@@ -3,6 +3,7 @@
 #include "ns2_config.h"
 #include "ns2_gatt.h"
 #include "ns2_input.h"
+#include "ns2_feedback.h"
 #include "ns2_protocol.h"
 
 #include <algorithm>
@@ -1538,8 +1539,8 @@ void process_ble_work() {
     }
     if (s_ble.stage == Stage::Ready && xQueueReceive(s_rumble_queue, &rumble, 0) == pdTRUE) {
         InputSnapshot source{};
-        if (!input_get_snapshot(&source) || !source.valid ||
-            source.source_epoch != rumble.source_epoch) return;
+        input_get_snapshot(&source);
+        if (!feedback_ble_allowed(rumble.data,rumble.len,rumble.source_epoch,source)) return;
         s_ble.write_in_flight = !s_ble.rumble_no_rsp;
         s_ble.write_started_us = now;
         const int rc = s_ble.rumble_no_rsp
@@ -1656,7 +1657,8 @@ bool ble_send_rumble(const uint8_t *data, uint16_t len, uint32_t source_epoch) {
     ble_get_stats(&stats);
     if (!s_rumble_queue || !stats.connected || !stats.rumble_ready || !data || len == 0 || len > sizeof(RumbleRequest::data)) return false;
     InputSnapshot source{};
-    if (!input_get_snapshot(&source) || !source.valid || source.source_epoch != source_epoch) return false;
+    input_get_snapshot(&source);
+    if (!feedback_ble_allowed(data,len,source_epoch,source)) return false;
     RumbleRequest request{};
     request.source_epoch = source_epoch;
     request.len = len;

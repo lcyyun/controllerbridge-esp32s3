@@ -113,6 +113,8 @@ void xQueueReset(QueueHandle_t queue){queue->ready=false;}
         between(usb, 'uint16_t normalize_stick_axis(', 'OutputMode next_output_mode('),
         between(usb, 'int16_t axis_to_xinput_normalized(', 'uint8_t axis_to_u8_normalized('),
         between(usb, 'int clamp_int(', 'int map_switch_amp_to_ble('),
+        between(usb, 'void build_ble_vibration_data(', 'uint8_t scale_u8_percent('),
+        between(usb, 'void write_motor_block(', 'bool has_non_zero_payload('),
         between(usb, 'struct Ds5AudioPacket {', 'void usb_event_cb(')]
     parts += [r'''
 void set_report_rate(uint32_t n){s_usb.report_rate_hz=n;s_usb.report_interval_us=1000000/n;}
@@ -172,6 +174,34 @@ void descriptor_tests(){
     assert(std::strcmp(short_status,"{\"ok\":false,\"error\":\"reply_too_large\"}")==0);
 }
 void feedback_tests(){
+    // Build stop bytes with the production codec, rather than duplicating its
+    // packet format in the test. Every motor/frame must remain neutral.
+    uint8_t frames[3][5],neutral[33];
+    for(auto &frame:frames)build_zero_ble_vibration(frame);
+    InputSnapshot stale;stale.source_epoch=42;
+    for(unsigned counter=0;counter<16;counter++) {
+        build_pro2_hd_packet(counter,frames,frames,neutral);
+        assert(feedback_is_neutral_stop(neutral,sizeof(neutral)));
+        assert(feedback_ble_allowed(neutral,sizeof(neutral),42,stale));
+        assert(!feedback_ble_allowed(neutral,sizeof(neutral),41,stale));
+    }
+    assert(!feedback_is_neutral_stop(nullptr,33));
+    assert(!feedback_is_neutral_stop(neutral,32));
+    assert(!feedback_is_neutral_stop(neutral,34));
+    for(unsigned motor=0;motor<2;motor++)for(unsigned frame=0;frame<3;frame++) {
+        uint8_t changed[33];std::memcpy(changed,neutral,sizeof(changed));
+        changed[3+motor*16+frame*5]|=4; // low-frequency amplitude becomes nonzero
+        assert(!feedback_is_neutral_stop(changed,sizeof(changed)));
+        assert(!feedback_ble_allowed(changed,sizeof(changed),42,stale));
+        stale.valid=true;assert(feedback_ble_allowed(changed,sizeof(changed),42,stale));stale.valid=false;
+        std::memcpy(changed,neutral,sizeof(changed));changed[5+motor*16+frame*5]|=0x40;
+        assert(!feedback_ble_allowed(changed,sizeof(changed),42,stale)); // nonzero high-frequency amplitude
+    }
+    for(unsigned position:{0u,1u,17u,2u}) {
+        uint8_t changed[33];std::memcpy(changed,neutral,sizeof(changed));changed[position]^=0x10;
+        assert(!feedback_ble_allowed(changed,sizeof(changed),42,stale));
+    }
+    stale.valid=true;assert(!feedback_ble_allowed(neutral,sizeof(neutral),41,stale));
     s_host_feedback_queue=xQueueCreateStatic(1,sizeof(HostFeedbackPacket),s_host_feedback_queue_buffer,&s_host_feedback_queue_storage);
     mock_input.valid=true;mock_input.source_epoch=7;mock_time_us=1000;
     uint8_t active[]={99},stop[]={0};
@@ -256,7 +286,7 @@ int main(){
             assert response['encrypted'] and response['pairing_key_saved'] and response['persist_pending']
             assert response['persist_error']==-123
     (work/'result.json').write_text(json.dumps({'module':str(args.module),'commands':commands,'passed':True},indent=2))
-    print(f'PASS: actual USB descriptors + pinned DWC2 allocation, deferred feedback/epoch/expiry/latest-stop, JSON escaping, {len(commands)} module/runtime commands')
+    print(f'PASS: actual USB descriptors + pinned DWC2 allocation, deferred feedback/epoch/expiry/latest-stop/stale-neutral, JSON escaping, {len(commands)} module/runtime commands')
 
 
 if __name__=='__main__':
